@@ -4,6 +4,8 @@ Plant Agent
 Reads the latest sensor data for one plant, computes water and light deficits,
 scores urgency, and returns ResourceRequests for the Coordinator to resolve.
 """
+import requests
+
 from app.models.domain import (
     PlantProfile, SensorReading, ResourceRequest, ResourceType, HealthStatus
 )
@@ -99,5 +101,21 @@ class PlantAgent:
                 requested_amount=l_deficit * 60.0,   # minutes, max 60min per cycle
             ))
 
-        logger.info("[%s] Generated %d request(s) | status=%s", self.profile.plant_id, len(requests), status.value)
+        logger.info(
+            "[%s] status=%s | water_deficit=%.2f | light_deficit=%.2f",
+            self.profile.plant_id,
+            status.value,
+            self.water_deficit(reading),
+            self.light_deficit(reading),
+        )
+        for req in requests:
+            logger.info(
+                "[%s] → REQUEST resource=%s | urgency=%.3f | utility=%.4f | amount=%.1f %s",
+                self.profile.plant_id,
+                req.resource.value,
+                req.urgency,
+                req.utility,
+                req.requested_amount,
+                "ml" if req.resource.value == "water" else "min",
+            )
         return requests
