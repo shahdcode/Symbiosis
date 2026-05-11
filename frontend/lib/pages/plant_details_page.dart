@@ -1,7 +1,5 @@
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import '../models/data_models.dart';
-import '../widgets/custom_painters.dart';
+import '../shared/painters.dart';
 
 class PlantDetailsPage extends StatelessWidget {
   const PlantDetailsPage({super.key});
@@ -182,6 +180,22 @@ class _Leaf extends StatelessWidget {
       ),
     );
   }
+}
+
+class StatTileData {
+  const StatTileData({
+    required this.title,
+    required this.value,
+    required this.subtitle,
+    required this.icon,
+    required this.accent,
+  });
+
+  final String title;
+  final String value;
+  final String subtitle;
+  final IconData icon;
+  final Color accent;
 }
 
 class _PlantStatsGrid extends StatelessWidget {

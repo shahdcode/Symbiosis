@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import '../widgets/custom_painters.dart';
-import '../widgets/shared_components.dart';
+import '../shared/painters.dart';
+import '../shared/widgets.dart';
 
 class DashboardPage extends StatelessWidget {
   const DashboardPage({super.key});
@@ -388,6 +388,53 @@ class _LightZoneCard extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class LiquidMeter extends StatelessWidget {
+  const LiquidMeter({required this.value});
+
+  final double value;
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0.12, end: value),
+      duration: const Duration(milliseconds: 1600),
+      curve: Curves.easeOutCubic,
+      builder: (context, fill, _) {
+        return Container(
+          decoration: BoxDecoration(
+            color: const Color(0xFFF1F7F1),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: const Color(0xFFDCE8DE)),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: FractionallySizedBox(
+                heightFactor: fill,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Container(
+                      decoration: const BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.bottomCenter,
+                          end: Alignment.topCenter,
+                          colors: [Color(0xFF3BA85F), Color(0xFF93D9A1)],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

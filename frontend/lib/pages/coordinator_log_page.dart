@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import '../models/data_models.dart';
 
 class CoordinatorLogPage extends StatelessWidget {
   const CoordinatorLogPage({super.key});
@@ -200,4 +199,22 @@ class _DecisionCard extends StatelessWidget {
       ),
     );
   }
+}
+
+class DecisionEntry {
+  const DecisionEntry({
+    required this.time,
+    required this.icon,
+    required this.title,
+    required this.reason,
+    required this.emphasis,
+    required this.color,
+  });
+
+  final String time;
+  final IconData icon;
+  final String title;
+  final String reason;
+  final String emphasis;
+  final Color color;
 }

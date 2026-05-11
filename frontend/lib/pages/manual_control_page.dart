@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import '../widgets/shared_components.dart';
+import '../shared/widgets.dart';
 
 class ManualControlPage extends StatefulWidget {
   const ManualControlPage({super.key});
@@ -202,6 +202,178 @@ class _ManualControlPageState extends State<ManualControlPage> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class ModeBadge extends StatelessWidget {
+  const ModeBadge({required this.autoPilot});
+
+  final bool autoPilot;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: autoPilot ? const Color(0xFFEAF6EE) : const Color(0xFFF5EFE0),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        autoPilot ? 'Auto' : 'Manual',
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: autoPilot ? const Color(0xFF2F8F5B) : const Color(0xFFC98A1D),
+        ),
+      ),
+    );
+  }
+}
+
+class MasterSwitch extends StatelessWidget {
+  const MasterSwitch({
+    required this.value,
+    required this.accent,
+    required this.onChanged,
+  });
+
+  final bool value;
+  final Color accent;
+  final Function(bool) onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(value ? Icons.hub_rounded : Icons.pan_tool_rounded, color: accent),
+        const SizedBox(width: 10),
+        const Expanded(
+          child: Text(
+            'Auto-pilot mode',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+          ),
+        ),
+        Switch(value: value, activeColor: accent, onChanged: onChanged),
+      ],
+    );
+  }
+}
+
+class ControlPanel extends StatelessWidget {
+  const ControlPanel({
+    required this.title,
+    required this.subtitle,
+    required this.child,
+  });
+
+  final String title;
+  final String subtitle;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(30),
+        border: Border.all(color: const Color(0xFFE2ECE4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            subtitle,
+            style: const TextStyle(
+              fontSize: 12,
+              color: Color(0xFF6E8577),
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 14),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+class ValueTile extends StatelessWidget {
+  const ValueTile({
+    required this.label,
+    required this.value,
+    required this.accent,
+  });
+
+  final String label;
+  final String value;
+  final Color accent;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: accent.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF6E8577),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w800,
+              color: accent,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class ToggleRow extends StatelessWidget {
+  const ToggleRow({
+    required this.title,
+    required this.value,
+    required this.accent,
+    required this.onChanged,
+  });
+
+  final String title;
+  final bool value;
+  final Color accent;
+  final Function(bool) onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            title,
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+          ),
+        ),
+        Switch(value: value, activeColor: accent, onChanged: onChanged),
+      ],
     );
   }
 }
