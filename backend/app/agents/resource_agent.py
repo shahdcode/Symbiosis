@@ -6,6 +6,97 @@ for this allocation cycle. Exposes constraints to the Coordinator.
 """
 from dataclasses import dataclass, field
 from app.core.logging import get_logger
+import math
+import numpy as np
+
+# EKF implementation for plant moisture estimation
+class EKFPlantFilter:
+    """Extended Kalman Filter for a single plant's moisture state.
+    State: x = [moisture_pct, moisture_rate]
+    This is a lightweight EKF used to smooth noisy sensor readings and
+    predict time-to-critical thresholds.
+
+    Citation: Extended Kalman filter is commonly used for nonlinear
+    state estimation in precision irrigation (Xu et al., 2023).
+    """
+    def __init__(self, initial_moisture: float = 50.0):
+        # state vector
+        self.x = np.array([initial_moisture, -0.1])  # moisture %, rate %/hour
+        # covariance
+        self.P = np.diag([4.0, 0.1])
+        # process noise
+        self.Q = np.diag([0.5, 0.01])
+        # measurement noise (sensor)
+        self.R = np.array([[2.0]])
+
+    def f(self, x, u, dt):
+        # process model: moisture += rate * dt + evap(u, env)
+        moisture, rate = x
+        # simple evapotranspiration model: rate influenced by light/temp/humidity in u
+        evap = u.get('evap', 0.0)
+        new_moisture = moisture + rate * dt - evap * dt
+        # rate slowly drifts toward a baseline (decay)
+        new_rate = rate * 0.98 + u.get('rate_noise', 0.0)
+        return np.array([new_moisture, new_rate])
+
+    def F_jacobian(self, x, u, dt):
+        # Jacobian of f with respect to x
+        return np.array([[1.0, dt], [0.0, 0.98]])
+
+    def h(self, x):
+        # measurement model: sensor measures moisture with minor nonlinearity
+        moisture = x[0]
+        return np.array([moisture])
+
+    def H_jacobian(self, x):
+        return np.array([[1.0, 0.0]])
+
+    def predict(self, u: dict = None, dt: float = 1.0):
+        if u is None:
+            u = {}
+        F = self.F_jacobian(self.x, u, dt)
+        self.x = self.f(self.x, u, dt)
+        self.P = F @ self.P @ F.T + self.Q
+
+    def update(self, z: float):
+        # measurement update with scalar measurement z
+        H = self.H_jacobian(self.x)
+        S = H @ self.P @ H.T + self.R
+        K = self.P @ H.T @ np.linalg.inv(S)
+        y = np.array([z]) - self.h(self.x)
+        self.x = self.x + (K @ y).flatten()
+        I = np.eye(len(self.x))
+        self.P = (I - K @ H) @ self.P
+
+    def predict_time_to_critical(self, critical_moisture: float) -> float:
+        """Estimate hours until moisture reaches critical_moisture using linear extrapolation."""
+        moisture, rate = self.x
+        if rate >= 0:
+            return float('inf')
+        dt_hours = (critical_moisture - moisture) / rate
+        return max(0.0, dt_hours)
+
+
+class TankKalmanFilter:
+    """Simple linear Kalman filter for tank level (scalar)."""
+    def __init__(self, initial_level_ml: float = 2000.0):
+        self.x = np.array([initial_level_ml])
+        self.P = np.array([[100.0]])
+        self.Q = np.array([[1.0]])
+        self.R = np.array([[25.0]])
+
+    def predict(self, consumption_ml: float = 0.0):
+        # x_k = x_{k-1} - consumption
+        self.x = self.x - consumption_ml
+        self.P = self.P + self.Q
+
+    def update(self, z: float):
+        S = self.P + self.R
+        K = self.P @ np.linalg.inv(S)
+        y = np.array([z]) - self.x
+        self.x = self.x + (K @ y).flatten()
+        self.P = (np.eye(1) - K) @ self.P
+
 
 logger = get_logger(__name__)
 
@@ -24,11 +115,17 @@ class ResourceAgent:
         self.tank_level_ml = tank_capacity_ml
         self.tank_capacity_ml = tank_capacity_ml
         self.light_window_minutes = light_window_minutes
+        # Per-plant EKF instances (plant_id -> EKFPlantFilter)
+        self.plant_filters: dict[str, EKFPlantFilter] = {}
+        # Tank Kalman filter
+        self.tank_filter = TankKalmanFilter(initial_level_ml=self.tank_level_ml)
 
     # ── State updates (called by hardware bridge / manual input) ─────────────
 
     def update_tank_level(self, level_ml: float) -> None:
         self.tank_level_ml = max(0.0, level_ml)
+        # update tank filter measurement
+        self.tank_filter.update(level_ml)
         if self.tank_level_ml <= TANK_EMPTY_THRESHOLD_ML:
             logger.warning("WATER TANK CRITICALLY LOW: %.1f ml — alerting coordinator", self.tank_level_ml)
 

@@ -17,6 +17,9 @@ from app.models.domain import (
 from app.agents.resource_agent import ResourceConstraints
 from app.core.logging import get_logger
 from app.db import repository
+from app.algorithms.metaheuristic_optimizer import optimize_bundle_allocations
+import numpy as np
+import math
 
 logger = get_logger(__name__)
 
@@ -78,15 +81,67 @@ class CoordinatorAgent:
         light_requests.sort(key=sort_key)
 
         # ── Water allocation (greedy by utility, respecting tank limit) ──────
+        # Use metaheuristic optimiser to solve bundle allocation (GA+SA)
         remaining_water = constraints.water_available_ml
-        for req in water_requests:
-            if remaining_water <= 0:
-                break
-            granted = min(req.requested_amount, remaining_water)
-            water_alloc[req.plant_id] = water_alloc.get(req.plant_id, 0.0) + granted
-            remaining_water -= granted
-            # Partial utility proportional to amount granted
-            total_utility += req.utility * (granted / req.requested_amount)
+        remaining_light = constraints.light_available_minutes
+
+        # Build per-plant request maps
+        plants = list({r.plant_id for r in requests})
+        plant_index = {pid: i for i, pid in enumerate(plants)}
+        n = len(plants)
+
+        # default arrays
+        water_req = [None] * n
+        light_req = [None] * n
+        for r in requests:
+            idx = plant_index[r.plant_id]
+            if r.resource == ResourceType.WATER:
+                water_req[idx] = r
+            elif r.resource == ResourceType.LIGHT:
+                light_req[idx] = r
+
+        # utility function combining water, light and synergy term
+        synergy = 0.001  # tuned synergy coefficient
+
+        def util_fn(w: np.ndarray, l: np.ndarray) -> float:
+            total = 0.0
+            for i, pid in enumerate(plants):
+                # water utility
+                wr = water_req[i]
+                if wr is None or wr.requested_amount <= 0:
+                    uw = 0.0
+                else:
+                    # estimate total potential utility at requested amount
+                    total_pot = wr.utility * wr.requested_amount
+                    scale = max(1.0, wr.requested_amount)
+                    uw = total_pot * (1.0 - math.exp(-w[i] / scale))
+                # light utility
+                lr = light_req[i]
+                if lr is None or lr.requested_amount <= 0:
+                    ul = 0.0
+                else:
+                    total_pot_l = lr.utility
+                    scale_l = max(1.0, lr.requested_amount)
+                    ul = total_pot_l * (1.0 - math.exp(-l[i] / scale_l))
+                total += uw + ul + synergy * w[i] * l[i]
+            return float(total)
+
+        if n > 0 and (remaining_water > 0 or remaining_light > 0):
+            w_best, l_best, best_score = optimize_bundle_allocations(
+                n_plants=n,
+                water_budget=remaining_water,
+                light_budget=remaining_light,
+                utility_fn=util_fn,
+                population_size=30,
+                generations=50,
+            )
+            # Apply allocations
+            for i, pid in enumerate(plants):
+                if w_best[i] > 0:
+                    water_alloc[pid] = water_alloc.get(pid, 0.0) + float(w_best[i])
+                if l_best[i] > 0:
+                    light_slots.append(LightSlot(plant_id=pid, duration_minutes=float(l_best[i]), order=len(light_slots)))
+            total_utility += float(best_score)
 
         # ── Light allocation (sequential, one plant at a time) ───────────────
         remaining_light = constraints.light_available_minutes

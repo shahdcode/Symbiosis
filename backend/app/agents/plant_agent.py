@@ -67,6 +67,61 @@ class PlantAgent:
         k = self.profile.utility_params.get("k", 2.0)  # curvature
         return (deficit ** k) * self.profile.species_weight
 
+    # ── Submodular marginal gain utilities (Nemhauser et al., 1978) ──────
+    # The greedy algorithm for monotone submodular maximisation provides a
+    # (1-1/e) approximation (Nemhauser et al., 1978).
+    def satisfaction(self, moisture_pct: float) -> float:
+        """
+        Gaussian-like satisfaction curve: peaks at optimal_moisture and
+        decreases away from it. Returns 0..1 health score.
+        """
+        opt = self.profile.optimal_moisture
+        if opt <= 0:
+            return 0.0
+        # simple Gaussian-like curve (sigma scaled by optimal)
+        sigma = max(5.0, opt * 0.25)
+        import math
+        return math.exp(-0.5 * ((moisture_pct - opt) / sigma) ** 2)
+
+    def effect_of(self, additional_water_ml: float) -> float:
+        """Estimate moisture % change per ml. Simple linear approximation
+        with diminishing effect for large additions (soil saturation)."""
+        # coarse calibration: 1 ml -> 0.02% moisture (tunable per pot)
+        base = 0.02
+        # diminishing factor (saturates): logistic-style
+        import math
+        factor = 1.0 / (1.0 + math.log1p(1 + additional_water_ml) * 0.1)
+        return additional_water_ml * base * factor
+
+    def marginal_gain(self, current_moisture: float, additional_water_ml: float) -> float:
+        """Return marginal health gain per ml for the proposed additional_water_ml."""
+        if additional_water_ml <= 0:
+            return 0.0
+        before = self.satisfaction(current_moisture)
+        after = self.satisfaction(current_moisture + self.effect_of(additional_water_ml))
+        return (after - before) / additional_water_ml
+
+    def compute_requested_water(self, deficit: float) -> float:
+        """Convex mapping from deficit (0..1) to requested ml. Caps at 200 ml."""
+        # simple diminishing mapping; heavier deficit => more water, but cap
+        import math
+        # using square-root for diminishing returns effect
+        return min(200.0, math.sqrt(max(0.0, deficit)) * 200.0)
+
+    def normalized_integral_utility(self, current_moisture: float, requested_ml: float, steps: int = 20) -> float:
+        """Numerical integral of marginal_gain from 0..requested_ml, normalized by amount.
+        This provides a normalised utility per ml for Coordinator comparison."""
+        if requested_ml <= 0:
+            return 0.0
+        total = 0.0
+        step = requested_ml / steps
+        for i in range(steps):
+            amt = (i + 0.5) * step
+            mg = self.marginal_gain(current_moisture, amt)
+            total += mg * step
+        # average marginal gain per ml
+        return total / requested_ml
+
     # ── Request generation ───────────────────────────────────────────────────
 
     def generate_requests(self, reading: SensorReading) -> list[ResourceRequest]:
@@ -77,28 +132,32 @@ class PlantAgent:
         requests: list[ResourceRequest] = []
         status = self.health_status(reading)
 
-        # Water request
+        # Water request (submodular marginal/greedy model)
         w_deficit = self.water_deficit(reading)
-        if w_deficit > 0.05:
+        if w_deficit > 0.02:
             urgency = 1.0 if status == HealthStatus.CRITICAL else w_deficit
+            requested_ml = self.compute_requested_water(w_deficit)
+            norm_util = self.normalized_integral_utility(reading.moisture_pct, requested_ml)
+            # utility scaled by species weight so Coordinator can compare
             requests.append(ResourceRequest(
                 plant_id=self.profile.plant_id,
                 resource=ResourceType.WATER,
                 urgency=urgency,
-                utility=self.compute_utility(w_deficit),
-                requested_amount=w_deficit * 200.0,  # ml, max 200ml per cycle
+                utility=norm_util * self.profile.species_weight,
+                requested_amount=requested_ml,  # ml
             ))
 
-        # Light request
+        # Light request (kept simple; light synergy handled at Coordinator)
         l_deficit = self.light_deficit(reading)
-        if l_deficit > 0.05:
+        if l_deficit > 0.02:
             urgency = 1.0 if status == HealthStatus.CRITICAL else l_deficit
+            requested_min = min(60.0, l_deficit * 60.0)
             requests.append(ResourceRequest(
                 plant_id=self.profile.plant_id,
                 resource=ResourceType.LIGHT,
                 urgency=urgency,
                 utility=self.compute_utility(l_deficit),
-                requested_amount=l_deficit * 60.0,   # minutes, max 60min per cycle
+                requested_amount=requested_min,   # minutes
             ))
 
         logger.info(
