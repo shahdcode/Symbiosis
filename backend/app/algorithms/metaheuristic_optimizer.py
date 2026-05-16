@@ -43,6 +43,8 @@ def optimize_bundle_allocations(
     best = max(pop, key=fitness)
     best_score = fitness(best)
 
+    no_improve = 0
+    prev_best = best_score
     for g in range(generations):
         # tournament selection
         new_pop = []
@@ -80,6 +82,14 @@ def optimize_bundle_allocations(
             if s > best_score:
                 best = ind.copy()
                 best_score = s
+        # early stopping if no meaningful improvement
+        if best_score - prev_best < 1e-6:
+            no_improve += 1
+        else:
+            no_improve = 0
+        prev_best = best_score
+        if no_improve >= 5:
+            break
         # Simulated annealing local refinement on best
         best, best_score = _simulated_annealing_local(best, best_score, fitness)
     w_best = best[:n_plants]

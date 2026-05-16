@@ -23,5 +23,7 @@ async def system_status():
         "last_decision": decisions[0] if decisions else None,
         "tank_level_ml": constraints.water_available_ml,
         "tank_critical": constraints.tank_critical,
+        "predicted_tank_hours": constraints.predicted_tank_hours,
+        "plant_warnings": constraints.plant_warnings,
         "light_available_minutes": constraints.light_available_minutes,
     }

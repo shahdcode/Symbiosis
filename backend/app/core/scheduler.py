@@ -51,6 +51,9 @@ async def allocation_cycle() -> None:
                 logger.warning("No profile for %s — skipping", reading.plant_id)
                 continue
 
+            # Update EKF with latest measurement
+            _resource_agent.update_plant_ekf(reading.plant_id, reading.moisture_pct, reading.temperature_c, reading.humidity_pct, reading.light_lux)
+
             # 3. Plant Agent generates requests
             agent = PlantAgent(profiles[reading.plant_id])
             requests = agent.generate_requests(reading)
@@ -60,6 +63,9 @@ async def allocation_cycle() -> None:
         constraints = _resource_agent.get_constraints()
         if constraints.tank_critical:
             logger.warning("⚠️  Tank critical — water requests suppressed this cycle")
+        else:
+            if constraints.predicted_tank_hours is not None:
+                logger.info("Tank predicted hours remaining: %.2f hours", constraints.predicted_tank_hours)
 
         # 5. Coordinator allocates
         decision = await _coordinator.allocate(all_requests, constraints)

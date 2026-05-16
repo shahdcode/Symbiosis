@@ -6,15 +6,18 @@ from app.core.logging import setup_logging
 from app.db.connection import connect_db, close_db
 from app.core.scheduler import start_scheduler, stop_scheduler
 from app.api.routes import plants, readings, decisions, overrides, status
+from app.hardware.bridge import start_bridge, stop_bridge as stop_hw_bridge
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
     await connect_db()
+    await start_bridge()
     start_scheduler()
     yield
     stop_scheduler()
+    await stop_hw_bridge()
     await close_db()
 
 

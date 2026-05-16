@@ -11,5 +11,19 @@ services:
     environment:
       MONGO_INITDB_DATABASE: symbiosis
 
+  backend:
+    build:
+      context: ./backend
+    container_name: symbiosis_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017
+      - MONGO_DB_NAME=symbiosis
+    depends_on:
+      - mongodb
+    volumes:
+      - ./backend:/app
+
 volumes:
   mongo_data:

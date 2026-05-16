@@ -108,6 +108,8 @@ class ResourceConstraints:
     water_available_ml: float
     light_available_minutes: float
     tank_critical: bool = False    # True → alert user, halt water decisions
+    predicted_tank_hours: float | None = None
+    plant_warnings: dict | None = None
 
 
 class ResourceAgent:
@@ -136,11 +138,32 @@ class ResourceAgent:
 
     def get_constraints(self) -> ResourceConstraints:
         tank_critical = self.tank_level_ml <= TANK_EMPTY_THRESHOLD_ML
+        # estimate hours remaining using tank_filter and nominal consumption
+        try:
+            hours = float(self.tank_level_ml / max(1.0, getattr(__import__('app.core.config', fromlist=['settings']), 'settings').nominal_consumption_ml_per_hour))
+        except Exception:
+            hours = None
         return ResourceConstraints(
             water_available_ml=self.tank_level_ml if not tank_critical else 0.0,
             light_available_minutes=self.light_window_minutes,
             tank_critical=tank_critical,
+            predicted_tank_hours=hours,
+            plant_warnings={},
         )
+
+    def update_plant_ekf(self, plant_id: str, moisture_pct: float, temperature: float | None = None, humidity: float | None = None, light_lux: float | None = None) -> None:
+        """Create or update the EKF for a plant based on a new moisture measurement."""
+        if plant_id not in self.plant_filters:
+            self.plant_filters[plant_id] = EKFPlantFilter(initial_moisture=moisture_pct)
+        f = self.plant_filters[plant_id]
+        # predict step (dt in hours -> small fraction, use 1/12 hour for 5-minute read)
+        f.predict(u={'evap': 0.01}, dt=1.0/12.0)
+        f.update(moisture_pct)
+        # check predicted time to critical
+        critical = getattr(__import__('app.core.config', fromlist=['settings']), 'settings').ekf_process_q_rate
+        ttc = f.predict_time_to_critical(critical_moisture=15.0)
+        if ttc < getattr(__import__('app.core.config', fromlist=['settings']), 'settings').plant_warning_hours:
+            logger.warning("Plant %s predicted to reach critical moisture in %.2f hours", plant_id, ttc)
 
     # ── Consume resources after allocation ──────────────────────────────────
 

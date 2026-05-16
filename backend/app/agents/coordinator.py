@@ -19,6 +19,7 @@ from app.core.logging import get_logger
 from app.db import repository
 from app.algorithms.metaheuristic_optimizer import optimize_bundle_allocations
 import numpy as np
+from app.core.config import settings
 import math
 
 logger = get_logger(__name__)
@@ -101,7 +102,7 @@ class CoordinatorAgent:
                 light_req[idx] = r
 
         # utility function combining water, light and synergy term
-        synergy = 0.001  # tuned synergy coefficient
+        synergy = settings.synergy_coefficient
 
         def util_fn(w: np.ndarray, l: np.ndarray) -> float:
             total = 0.0
@@ -127,14 +128,48 @@ class CoordinatorAgent:
             return float(total)
 
         if n > 0 and (remaining_water > 0 or remaining_light > 0):
-            w_best, l_best, best_score = optimize_bundle_allocations(
-                n_plants=n,
-                water_budget=remaining_water,
-                light_budget=remaining_light,
-                utility_fn=util_fn,
-                population_size=30,
-                generations=50,
-            )
+            # Optionally use trained DRL policy (A2C) for fast inference
+            if settings.use_drl:
+                try:
+                    from stable_baselines3 import A2C
+                    import os
+                    model_path = os.path.join(os.path.dirname(__file__), '..', 'learning', 'models', 'a2c_symbiosis_final.zip')
+                    if os.path.exists(model_path):
+                        model = A2C.load(model_path)
+                        # build observation for model: simple vector of moistures + tank + light
+                        obs = []
+                        for pid in plants:
+                            # use latest reading if available
+                            r = await repository.get_latest_reading(pid)
+                            obs.append(r['moisture'] if r else 50.0)
+                        obs.append(constraints.water_available_ml)
+                        obs.append(constraints.light_available_minutes)
+                        act, _ = model.predict(np.array(obs), deterministic=True)
+                        # decode action into w and l
+                        w_best = np.array(act[:n])
+                        l_best = np.array(act[n:])
+                        best_score = util_fn(w_best, l_best)
+                    else:
+                        raise FileNotFoundError()
+                except Exception:
+                    # fallback to metaheuristic
+                    w_best, l_best, best_score = optimize_bundle_allocations(
+                        n_plants=n,
+                        water_budget=remaining_water,
+                        light_budget=remaining_light,
+                        utility_fn=util_fn,
+                        population_size=settings.ga_population_size,
+                        generations=settings.ga_generations,
+                    )
+            else:
+                w_best, l_best, best_score = optimize_bundle_allocations(
+                    n_plants=n,
+                    water_budget=remaining_water,
+                    light_budget=remaining_light,
+                    utility_fn=util_fn,
+                    population_size=settings.ga_population_size,
+                    generations=settings.ga_generations,
+                )
             # Apply allocations
             for i, pid in enumerate(plants):
                 if w_best[i] > 0:

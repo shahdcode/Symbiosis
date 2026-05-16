@@ -14,6 +14,29 @@ class Settings(BaseSettings):
     # Hardware bridge — optional until Arduino is wired up
     arduino_port: str | None = None
     arduino_baud_rate: int = 9600
+    tank_capacity_ml: int = 5000
+    light_window_minutes: int = 120
+
+    # EKF / Kalman params
+    ekf_process_q_moisture: float = 0.5
+    ekf_process_q_rate: float = 0.01
+    ekf_measure_r: float = 2.0
+
+    # Metaheuristic params
+    ga_population_size: int = 20
+    ga_generations: int = 20
+    ga_early_stop_delta: float = 0.01
+    synergy_coefficient: float = 0.001
+
+    # DRL toggle
+    use_drl: bool = False
+
+    # Prediction thresholds
+    tank_warning_hours: int = 6
+    plant_warning_hours: int = 2
+
+    # Nominal consumption estimate used for tank prediction (ml/hour)
+    nominal_consumption_ml_per_hour: float = 50.0
 
 
 settings = Settings()
