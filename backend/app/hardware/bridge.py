@@ -65,12 +65,44 @@ async def stop_bridge():
     logger.info("Serial bridge stopped")
 
 
+import random as _random
+
+# Simulated moisture state per plant (drifts down over time, reset on watering)
+_sim_moisture: dict[str, float] = {}
+
 def read_sensors() -> list[SensorReading]:
     """Return the latest sensor readings collected from the Arduino.
 
-    If no hardware connected, returns an empty list.
+    If no hardware connected and SIMULATE_SENSORS env var is set,
+    returns simulated readings for all known plant IDs.
     """
-    return list(_latest_readings.values())
+    if _latest_readings:
+        return list(_latest_readings.values())
+
+    from app.core.config import settings
+    if not settings.simulate_sensors:
+        return []
+
+    # Simulated plant IDs — must match what's seeded in the DB
+    sim_plant_ids = ["plant_1", "plant_2", "plant_3", "plant_4", "plant_5"]
+    readings = []
+    for pid in sim_plant_ids:
+        # Drift moisture down slowly, simulate different stress levels
+        if pid not in _sim_moisture:
+            _sim_moisture[pid] = _random.uniform(25.0, 75.0)
+        else:
+            # each cycle loses 1–3% moisture (evapotranspiration)
+            _sim_moisture[pid] = max(5.0, _sim_moisture[pid] - _random.uniform(1.0, 3.0))
+
+        readings.append(SensorReading(
+            plant_id=pid,
+            moisture_pct=round(_sim_moisture[pid], 1),
+            light_lux=round(_random.uniform(800.0, 8000.0), 1),
+            temperature_c=round(_random.uniform(18.0, 28.0), 1),
+            humidity_pct=round(_random.uniform(40.0, 80.0), 1),
+            sensor_ok=True,
+        ))
+    return readings
 
 
 def _send_command(cmd: dict) -> None:
@@ -85,6 +117,9 @@ def _send_command(cmd: dict) -> None:
 
 def actuate_water(plant_id: str, ml: float) -> bool:
     _send_command({"water": {"plant": plant_id, "ml": float(ml)}})
+    # update simulated moisture when water is dispensed
+    if plant_id in _sim_moisture:
+        _sim_moisture[plant_id] = min(100.0, _sim_moisture[plant_id] + ml * 0.02)
     logger.info("Commanded water → %s: %.1f ml", plant_id, ml)
     return True
 

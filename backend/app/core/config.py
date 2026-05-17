@@ -38,5 +38,8 @@ class Settings(BaseSettings):
     # Nominal consumption estimate used for tank prediction (ml/hour)
     nominal_consumption_ml_per_hour: float = 50.0
 
+    # Simulation mode — generates fake sensor data when no Arduino is connected
+    simulate_sensors: bool = False
+
 
 settings = Settings()

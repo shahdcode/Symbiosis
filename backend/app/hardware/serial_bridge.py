@@ -7,8 +7,11 @@ Commands can be sent via `send_command`.
 import asyncio
 import json
 import logging
-import serial
-import serial.asyncio
+try:
+    import serial
+    import serial.asyncio
+except ImportError:
+    serial = None
 from typing import Callable
 
 logger = logging.getLogger(__name__)
@@ -41,7 +44,16 @@ class SerialBridgeProtocol(asyncio.Protocol):
         self.transport.write(line)
 
 
-async def open_serial(port: str, baud: int, on_message: Callable[[dict], None]):
+# async def open_serial(port: str, baud: int, on_message: Callable[[dict], None]):
+#     loop = asyncio.get_running_loop()
+#     protocol_factory = lambda: SerialBridgeProtocol(on_message)
+#     transport, protocol = await serial.asyncio.create_serial_connection(loop, protocol_factory, port, baudrate=baud)
+#     return transport, protocol
+
+
+async def open_serial(port: str, baud: int, on_message):
+    if serial is None:
+        raise RuntimeError("pyserial not installed")
     loop = asyncio.get_running_loop()
     protocol_factory = lambda: SerialBridgeProtocol(on_message)
     transport, protocol = await serial.asyncio.create_serial_connection(loop, protocol_factory, port, baudrate=baud)
