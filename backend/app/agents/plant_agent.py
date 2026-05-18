@@ -147,18 +147,26 @@ class PlantAgent:
                 requested_amount=requested_ml,  # ml
             ))
 
-        # Light request (kept simple; light synergy handled at Coordinator)
+        # Light: compute deficit and log recommendation only — no allocation
         l_deficit = self.light_deficit(reading)
+        target_lux = self.profile.light_value * 1000.0
         if l_deficit > 0.02:
-            urgency = 1.0 if status == HealthStatus.CRITICAL else l_deficit
-            requested_min = min(60.0, l_deficit * 60.0)
-            requests.append(ResourceRequest(
-                plant_id=self.profile.plant_id,
-                resource=ResourceType.LIGHT,
-                urgency=urgency,
-                utility=self.compute_utility(l_deficit),
-                requested_amount=requested_min,   # minutes
-            ))
+            recommended_min = min(60.0, l_deficit * 60.0)
+            logger.info(
+                "[%s] ☀️  LIGHT STATUS  current=%.0f lux | target=%.0f lux | deficit=%.0f%% | recommend +%.1f min exposure",
+                self.profile.plant_id,
+                reading.light_lux,
+                target_lux,
+                l_deficit * 100,
+                recommended_min,
+            )
+        else:
+            logger.info(
+                "[%s] ☀️  LIGHT STATUS  current=%.0f lux | target=%.0f lux | ✓ sufficient",
+                self.profile.plant_id,
+                reading.light_lux,
+                target_lux,
+            )
 
         logger.info(
             "[%s] status=%s | water_deficit=%.2f | light_deficit=%.2f",
