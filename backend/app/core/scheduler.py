@@ -104,24 +104,31 @@ async def allocation_cycle() -> None:
         else:
             logger.info("  💧 No water allocated this cycle")
 
-        if decision.light_schedule:
-            for slot in sorted(decision.light_schedule, key=lambda s: s.order):
-                pname = profiles[slot.plant_id].common_name
-                logger.info("  ☀️  %-10s (%s)  granted %.1f min (slot %d)",
-                            slot.plant_id, pname,        slot.duration_minutes, slot.order)
-        else:
-            logger.info("  ☀️  No light allocated this cycle")
+        # if decision.light_schedule:
+        #     for slot in sorted(decision.light_schedule, key=lambda s: s.order):
+        #         pname = profiles[slot.plant_id].common_name
+        #         logger.info("  ☀️  %-10s (%s)  granted %.1f min (slot %d)",
+        #                     slot.plant_id, pname,        slot.duration_minutes, slot.order)
+        # else:
+        #     logger.info("  ☀️  No light allocated this cycle")
 
+        # logger.info("  📊 Total utility : %.4f", decision.total_utility)
+
+        # # Actuate
+        # for plant_id, ml in decision.water_allocations.items():
+        #     actuate_water(plant_id, ml)
+        #     _resource_agent.consume_water(ml)
+
+        # for slot in sorted(decision.light_schedule, key=lambda s: s.order):
+        #     actuate_light(slot.plant_id, slot.duration_minutes)
+        #     _resource_agent.consume_light(slot.duration_minutes)
+        logger.info("  ☀️  Light is informational only — no light allocation performed")
         logger.info("  📊 Total utility : %.4f", decision.total_utility)
 
-        # Actuate
+        # Actuate water only
         for plant_id, ml in decision.water_allocations.items():
             actuate_water(plant_id, ml)
             _resource_agent.consume_water(ml)
-
-        for slot in sorted(decision.light_schedule, key=lambda s: s.order):
-            actuate_light(slot.plant_id, slot.duration_minutes)
-            _resource_agent.consume_light(slot.duration_minutes)
 
         # Learning
         logger.info("─" * 40)

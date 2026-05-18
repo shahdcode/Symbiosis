@@ -5,6 +5,8 @@ Tracks the shared water tank level and the available light window
 for this allocation cycle. Exposes constraints to the Coordinator.
 """
 from dataclasses import dataclass, field
+
+from ultralytics import settings
 from app.core.logging import get_logger
 import math
 import numpy as np
@@ -98,10 +100,11 @@ class TankKalmanFilter:
         self.P = (np.eye(1) - K) @ self.P
 
 
+from app.core.config import settings
+
 logger = get_logger(__name__)
 
 TANK_EMPTY_THRESHOLD_ML = 50.0    # halt water decisions below this
-
 
 @dataclass
 class ResourceConstraints:
@@ -138,33 +141,46 @@ class ResourceAgent:
 
     def get_constraints(self) -> ResourceConstraints:
         tank_critical = self.tank_level_ml <= TANK_EMPTY_THRESHOLD_ML
-        # estimate hours remaining using tank_filter and nominal consumption
         try:
-            hours = float(self.tank_level_ml / max(1.0, getattr(__import__('app.core.config', fromlist=['settings']), 'settings').nominal_consumption_ml_per_hour))
+            hours = float(
+                self.tank_level_ml
+                / max(1.0, settings.nominal_consumption_ml_per_hour)
+            )
         except Exception:
             hours = None
         return ResourceConstraints(
             water_available_ml=self.tank_level_ml if not tank_critical else 0.0,
-            light_available_minutes=self.light_window_minutes,
+            light_available_minutes=self.light_window_minutes,  # kept for status/info only
             tank_critical=tank_critical,
             predicted_tank_hours=hours,
             plant_warnings={},
         )
 
-    def update_plant_ekf(self, plant_id: str, moisture_pct: float, temperature: float | None = None, humidity: float | None = None, light_lux: float | None = None) -> None:
+    def update_plant_ekf(
+        self,
+        plant_id: str,
+        moisture_pct: float,
+        temperature: float | None = None,
+        humidity: float | None = None,
+        light_lux: float | None = None,
+    ) -> None:
         """Create or update the EKF for a plant based on a new moisture measurement."""
         if plant_id not in self.plant_filters:
             self.plant_filters[plant_id] = EKFPlantFilter(initial_moisture=moisture_pct)
         f = self.plant_filters[plant_id]
-        # predict step (dt in hours -> small fraction, use 1/12 hour for 5-minute read)
-        f.predict(u={'evap': 0.01}, dt=1.0/12.0)
+        # Build control input — evapotranspiration increases with temperature and light
+        evap = 0.01
+        if temperature is not None:
+            evap += max(0.0, (temperature - 20.0) * 0.002)
+        if light_lux is not None:
+            evap += light_lux / 1_000_000.0  # tiny lux contribution
+        f.predict(u={'evap': evap}, dt=1.0 / 12.0)
         f.update(moisture_pct)
-        # check predicted time to critical
-        critical = getattr(__import__('app.core.config', fromlist=['settings']), 'settings').ekf_process_q_rate
         ttc = f.predict_time_to_critical(critical_moisture=15.0)
-        if ttc < getattr(__import__('app.core.config', fromlist=['settings']), 'settings').plant_warning_hours:
-            logger.warning("Plant %s predicted to reach critical moisture in %.2f hours", plant_id, ttc)
-
+        if ttc < settings.plant_warning_hours:
+            logger.warning(
+                "Plant %s predicted to reach critical moisture in %.2f hours", plant_id, ttc
+            )
     # ── Consume resources after allocation ──────────────────────────────────
 
     def consume_water(self, ml: float) -> None:

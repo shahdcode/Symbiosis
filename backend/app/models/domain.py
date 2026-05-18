@@ -28,13 +28,19 @@ class PlantProfile(BaseModel):
     common_name: str
     species: str
     optimal_moisture: float = Field(..., ge=0, le=100)   # % soil moisture
+    moisture_min: float = 30.0             # lower safe bound (species-specific)
+    moisture_max: float = 80.0             # upper safe bound
     light_value: float = Field(..., ge=1, le=9)          # Ellenberg 1-9
     moisture_value: float = Field(..., ge=1, le=9)       # Ellenberg 1-9
     dli_requirement: float                               # mol/m²/day
+    preferred_humidity_pct: float = 50.0  # ideal ambient humidity %
+    humidity_min: float = 30.0
+    humidity_max: float = 80.0
+    optimal_temp_c: float = 22.0
+    temp_min_c: float = 10.0
+    temp_max_c: float = 38.0
     species_weight: float = 1.0            # coordinator weighting factor
     utility_params: dict = Field(default_factory=dict)  # learned params
-
-
 # ── Sensor reading ────────────────────────────────────────────────────────────
 
 class SensorReading(BaseModel):

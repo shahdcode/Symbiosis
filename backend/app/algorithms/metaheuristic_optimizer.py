@@ -1,7 +1,7 @@
-"""Hybrid GA + SA optimizer for combinatorial bundle allocation.
+"""Hybrid GA + SA optimizer for water allocation.
 
-This module provides a continuous optimisation routine to allocate water (ml)
-and light (minutes) to N plants subject to total water and light budgets.
+Allocates water (ml) to N plants subject to a total water budget.
+Light is informational only and is NOT allocated here.
 
 Citation: Combinatorial auction + metaheuristic (Parkes & Ungar, 2000).
 """
@@ -11,116 +11,159 @@ import math
 import numpy as np
 
 
-def optimize_bundle_allocations(
+def optimize_water_allocations(
     n_plants: int,
     water_budget: float,
-    light_budget: float,
-    utility_fn: Callable[[np.ndarray, np.ndarray], float],
+    utility_fn: Callable[[np.ndarray], float],
     population_size: int = 30,
     generations: int = 50,
-    alpha: float = 0.5,
-) -> Tuple[np.ndarray, np.ndarray, float]:
-    """Return (water_allocs, light_allocs, best_fitness)
+) -> Tuple[np.ndarray, float]:
+    """Return (water_allocs, best_fitness).
 
-    utility_fn takes two numpy arrays (w, l) and returns scalar fitness.
+    utility_fn takes a numpy array of water allocations (length n_plants)
+    and returns a scalar fitness value.
     """
-    # initialise population: each individual is concatenated [w1..wn, l1..ln]
-    def random_individual():
-        # sample proportions then scale to budgets
-        w_props = np.random.dirichlet(np.ones(n_plants))
-        l_props = np.random.dirichlet(np.ones(n_plants))
-        w = w_props * water_budget
-        l = l_props * light_budget
-        return np.concatenate([w, l])
+    if n_plants == 0 or water_budget <= 0:
+        return np.zeros(max(n_plants, 1)), 0.0
+
+    def random_individual() -> np.ndarray:
+        props = np.random.dirichlet(np.ones(n_plants))
+        return props * water_budget
 
     pop = [random_individual() for _ in range(population_size)]
 
-    def fitness(ind):
-        w = ind[:n_plants]
-        l = ind[n_plants:]
-        return utility_fn(w, l)
+    def fitness(ind: np.ndarray) -> float:
+        return utility_fn(ind)
 
     best = max(pop, key=fitness)
     best_score = fitness(best)
 
     no_improve = 0
     prev_best = best_score
-    for g in range(generations):
-        # tournament selection
-        new_pop = []
+
+    for _g in range(generations):
+        # elitism: carry best individual into next generation
+        new_pop = [best.copy()]
+
         while len(new_pop) < population_size:
+            # tournament selection (k=2)
             a, b = random.sample(pop, 2)
             parent = a if fitness(a) > fitness(b) else b
-            # crossover
+
+            # single-point crossover
             mate = random.choice(pop)
-            cut = random.randint(1, 2 * n_plants - 1)
+            cut = random.randint(1, n_plants - 1) if n_plants > 1 else 1
             child = np.concatenate([parent[:cut], mate[cut:]])
-            # mutation: perturb one gene and repair
-            idx = random.randrange(2 * n_plants)
-            child[idx] *= (1.0 + random.uniform(-0.2, 0.2))
-            # repair: rescale to budgets
-            w = child[:n_plants]
-            l = child[n_plants:]
-            # avoid negatives
-            w = np.clip(w, 0.0, None)
-            l = np.clip(l, 0.0, None)
-            if w.sum() > 0:
-                w = w / w.sum() * water_budget
+
+            # Gaussian mutation on a random gene
+            idx = random.randrange(n_plants)
+            child[idx] *= (1.0 + random.gauss(0.0, 0.15))
+
+            # repair: clip negatives then re-scale to budget
+            child = np.clip(child, 0.0, None)
+            total = child.sum()
+            if total > 0:
+                child = child / total * water_budget
             else:
-                w = np.zeros_like(w)
-            if l.sum() > 0:
-                l = l / l.sum() * light_budget
-            else:
-                l = np.zeros_like(l)
-            child = np.concatenate([w, l])
+                child = random_individual()
+
             new_pop.append(child)
+
         pop = new_pop
 
-        # evaluate and keep best
+        # update best
         for ind in pop:
             s = fitness(ind)
             if s > best_score:
                 best = ind.copy()
                 best_score = s
-        # early stopping if no meaningful improvement
-        if best_score - prev_best < 1e-6:
+
+        # SA local refinement on current best
+        best, best_score = _simulated_annealing_local(
+            best, best_score, fitness, water_budget, n_plants
+        )
+
+        # early stopping
+        improvement = best_score - prev_best
+        if improvement < 1e-6:
             no_improve += 1
         else:
             no_improve = 0
         prev_best = best_score
-        if no_improve >= 5:
+
+        if no_improve >= 8:
             break
-        # Simulated annealing local refinement on best
-        best, best_score = _simulated_annealing_local(best, best_score, fitness)
-    w_best = best[:n_plants]
-    l_best = best[n_plants:]
-    return w_best, l_best, best_score
+
+    return best, best_score
 
 
-def _simulated_annealing_local(individual: np.ndarray, score: float, fitness_fn: Callable) -> Tuple[np.ndarray, float]:
+def _simulated_annealing_local(
+    individual: np.ndarray,
+    score: float,
+    fitness_fn: Callable,
+    water_budget: float,
+    n_plants: int,
+    sa_steps: int = 40,
+    t_start: float = 50.0,
+    t_decay: float = 0.92,
+) -> Tuple[np.ndarray, float]:
+    """SA perturbation loop that respects the water budget constraint."""
     ind = individual.copy()
     current_score = score
-    T = 100.0
-    for i in range(20):
-        # propose small perturbation
+    T = t_start
+
+    for _ in range(sa_steps):
         prop = ind.copy()
-        idx = random.randrange(len(ind))
-        prop[idx] *= (1.0 + random.uniform(-0.3, 0.3))
-        # ensure non-negative
+
+        # swap-perturb: shift water from one plant to another
+        if n_plants > 1:
+            i, j = random.sample(range(n_plants), 2)
+            delta = random.uniform(0, prop[i] * 0.3)
+            prop[i] -= delta
+            prop[j] += delta
+        else:
+            prop[0] = water_budget
+
         prop = np.clip(prop, 0.0, None)
-        # repair proportions separately for water and light
-        n = len(ind) // 2
-        w = prop[:n]
-        l = prop[n:]
-        # if sums zero, skip
-        if w.sum() > 0:
-            w = w / w.sum() * ind[:n].sum()
-        if l.sum() > 0:
-            l = l / l.sum() * ind[n:].sum()
-        prop = np.concatenate([w, l])
+        total = prop.sum()
+        if total > 0:
+            prop = prop / total * water_budget
+
         prop_score = fitness_fn(prop)
-        if prop_score > current_score or math.exp((prop_score - current_score) / T) > random.random():
+        delta_e = prop_score - current_score
+
+        if delta_e > 0 or (T > 0 and math.exp(delta_e / T) > random.random()):
             ind = prop
             current_score = prop_score
-        T *= 0.95
+
+        T *= t_decay
+
     return ind, current_score
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compatible shim so existing imports don't break during transition
+# ---------------------------------------------------------------------------
+def optimize_bundle_allocations(
+    n_plants: int,
+    water_budget: float,
+    light_budget: float,          # kept for signature compat, ignored
+    utility_fn: Callable,         # must accept (w, l) — wrapped internally
+    population_size: int = 30,
+    generations: int = 50,
+    alpha: float = 0.5,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Legacy shim — light_budget is ignored; l_best is always zeros."""
+    def water_only_util(w: np.ndarray) -> float:
+        l = np.zeros(n_plants)
+        return utility_fn(w, l)
+
+    w_best, best_score = optimize_water_allocations(
+        n_plants=n_plants,
+        water_budget=water_budget,
+        utility_fn=water_only_util,
+        population_size=population_size,
+        generations=generations,
+    )
+    l_best = np.zeros(n_plants)
+    return w_best, l_best, best_score

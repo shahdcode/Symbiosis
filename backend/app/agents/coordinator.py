@@ -2,25 +2,30 @@
 Coordinator Agent
 -----------------
 Receives ResourceRequests from all Plant Agents and ResourceConstraints
-from the Resource Agent, then runs constrained utility-maximising allocation.
+from the Resource Agent, then runs constrained utility-maximising allocation
+for WATER only.
+
+Light is NOT allocated — the system logs light status as information only.
 
 Rules (in order of priority):
   1. If tank is critical → halt all water, alert user.
   2. If any plant is in CRITICAL health → emergency priority regardless of utility.
-  3. Otherwise → allocate to maximise Σ utility subject to resource constraints.
+  3. Otherwise → allocate water to maximise Σ utility subject to water budget.
   4. Honour any pending manual overrides before normal allocation.
 """
 import uuid
+import math
+
+import numpy as np
+
 from app.models.domain import (
     ResourceRequest, ResourceType, AllocationDecision, LightSlot
 )
 from app.agents.resource_agent import ResourceConstraints
 from app.core.logging import get_logger
 from app.db import repository
-from app.algorithms.metaheuristic_optimizer import optimize_bundle_allocations
-import numpy as np
+from app.algorithms.metaheuristic_optimizer import optimize_water_allocations
 from app.core.config import settings
-import math
 
 logger = get_logger(__name__)
 
@@ -36,12 +41,11 @@ class CoordinatorAgent:
         notes: list[str] = []
 
         water_alloc: dict[str, float] = {}
-        light_slots: list[LightSlot] = []
         total_utility = 0.0
 
         # ── Apply pending manual overrides first ─────────────────────────────
         overrides = await repository.get_pending_overrides()
-        override_plant_resources: set[tuple] = set()
+        override_plant_ids: set[str] = set()
         for ov in overrides:
             pid = ov["plant_id"]
             res = ov["resource"]
@@ -49,10 +53,8 @@ class CoordinatorAgent:
             if res == ResourceType.WATER:
                 water_alloc[pid] = amount
                 constraints.water_available_ml -= amount
-            elif res == ResourceType.LIGHT:
-                light_slots.append(LightSlot(plant_id=pid, duration_minutes=amount, order=0))
-                constraints.light_available_minutes -= amount
-            override_plant_resources.add((pid, res))
+                override_plant_ids.add(pid)
+            # Light overrides are informational — no allocation action taken
             await repository.mark_override_applied(ov["id"])
             notes.append(f"Manual override applied: {res} → {pid} ({amount})")
 
@@ -64,145 +66,106 @@ class CoordinatorAgent:
             water_requests = [
                 r for r in requests
                 if r.resource == ResourceType.WATER
-                and (r.plant_id, ResourceType.WATER) not in override_plant_resources
+                and r.plant_id not in override_plant_ids
             ]
 
-        light_requests = [
-            r for r in requests
-            if r.resource == ResourceType.LIGHT
-            and (r.plant_id, ResourceType.LIGHT) not in override_plant_resources
-        ]
+        # ── Sort by urgency then utility (emergency plants first) ─────────────
+        water_requests.sort(key=lambda r: (-r.urgency, -r.utility))
 
-        # ── Emergency priority ───────────────────────────────────────────────
-        # Plants with urgency=1.0 jump to front of queue
-        def sort_key(r: ResourceRequest):
-            return (-r.urgency, -r.utility)
+        # ── Water allocation via GA + SA metaheuristic ───────────────────────
+        remaining_water = max(0.0, constraints.water_available_ml)
 
-        water_requests.sort(key=sort_key)
-        light_requests.sort(key=sort_key)
+        if water_requests and remaining_water > 0:
+            plants = [r.plant_id for r in water_requests]
+            n = len(plants)
+            plant_index = {pid: i for i, pid in enumerate(plants)}
 
-        # ── Water allocation (greedy by utility, respecting tank limit) ──────
-        # Use metaheuristic optimiser to solve bundle allocation (GA+SA)
-        remaining_water = constraints.water_available_ml
-        remaining_light = constraints.light_available_minutes
+            # Build per-plant request lookup
+            req_map: dict[int, ResourceRequest] = {
+                plant_index[r.plant_id]: r for r in water_requests
+            }
 
-        # Build per-plant request maps
-        plants = list({r.plant_id for r in requests})
-        plant_index = {pid: i for i, pid in enumerate(plants)}
-        n = len(plants)
-
-        # default arrays
-        water_req = [None] * n
-        light_req = [None] * n
-        for r in requests:
-            idx = plant_index[r.plant_id]
-            if r.resource == ResourceType.WATER:
-                water_req[idx] = r
-            elif r.resource == ResourceType.LIGHT:
-                light_req[idx] = r
-
-        # utility function combining water, light and synergy term
-        synergy = settings.synergy_coefficient
-
-        def util_fn(w: np.ndarray, l: np.ndarray) -> float:
-            total = 0.0
-            for i, pid in enumerate(plants):
-                # water utility
-                wr = water_req[i]
-                if wr is None or wr.requested_amount <= 0:
-                    uw = 0.0
-                else:
-                    # estimate total potential utility at requested amount
-                    total_pot = wr.utility * wr.requested_amount
+            def water_utility_fn(w: np.ndarray) -> float:
+                total = 0.0
+                for i, pid in enumerate(plants):
+                    wr = req_map.get(i)
+                    if wr is None or wr.requested_amount <= 0:
+                        continue
+                    # Concave (diminishing-returns) utility:
+                    # U(w) = utility_per_ml * requested_amount * (1 - exp(-w / scale))
+                    # where utility_per_ml is the normalised marginal gain from PlantAgent.
                     scale = max(1.0, wr.requested_amount)
-                    uw = total_pot * (1.0 - math.exp(-w[i] / scale))
-                # light utility
-                lr = light_req[i]
-                if lr is None or lr.requested_amount <= 0:
-                    ul = 0.0
-                else:
-                    total_pot_l = lr.utility
-                    scale_l = max(1.0, lr.requested_amount)
-                    ul = total_pot_l * (1.0 - math.exp(-l[i] / scale_l))
-                total += uw + ul + synergy * w[i] * l[i]
-            return float(total)
+                    uw = wr.utility * scale * (1.0 - math.exp(-w[i] / scale))
+                    # Urgency bonus: critical plants get a multiplicative boost so
+                    # the optimiser strongly prefers them over lower-urgency plants.
+                    uw *= (1.0 + wr.urgency)
+                    total += uw
+                return total
 
-        if n > 0 and (remaining_water > 0 or remaining_light > 0):
-            # Optionally use trained DRL policy (A2C) for fast inference
+            # DRL fast-path (optional, falls back to metaheuristic)
             if settings.use_drl:
-                try:
-                    from stable_baselines3 import A2C
-                    import os
-                    model_path = os.path.join(os.path.dirname(__file__), '..', 'learning', 'models', 'a2c_symbiosis_final.zip')
-                    if os.path.exists(model_path):
-                        model = A2C.load(model_path)
-                        # build observation for model: simple vector of moistures + tank + light
-                        obs = []
-                        for pid in plants:
-                            # use latest reading if available
-                            r = await repository.get_latest_reading(pid)
-                            obs.append(r['moisture'] if r else 50.0)
-                        obs.append(constraints.water_available_ml)
-                        obs.append(constraints.light_available_minutes)
-                        act, _ = model.predict(np.array(obs), deterministic=True)
-                        # decode action into w and l
-                        w_best = np.array(act[:n])
-                        l_best = np.array(act[n:])
-                        best_score = util_fn(w_best, l_best)
-                    else:
-                        raise FileNotFoundError()
-                except Exception:
-                    # fallback to metaheuristic
-                    w_best, l_best, best_score = optimize_bundle_allocations(
+                w_best = _try_drl_water(plants, constraints, n)
+                if w_best is None:
+                    w_best, _ = optimize_water_allocations(
                         n_plants=n,
                         water_budget=remaining_water,
-                        light_budget=remaining_light,
-                        utility_fn=util_fn,
+                        utility_fn=water_utility_fn,
                         population_size=settings.ga_population_size,
                         generations=settings.ga_generations,
                     )
             else:
-                w_best, l_best, best_score = optimize_bundle_allocations(
+                w_best, _ = optimize_water_allocations(
                     n_plants=n,
                     water_budget=remaining_water,
-                    light_budget=remaining_light,
-                    utility_fn=util_fn,
+                    utility_fn=water_utility_fn,
                     population_size=settings.ga_population_size,
                     generations=settings.ga_generations,
                 )
-            # Apply allocations
-            for i, pid in enumerate(plants):
-                if w_best[i] > 0:
-                    water_alloc[pid] = water_alloc.get(pid, 0.0) + float(w_best[i])
-                if l_best[i] > 0:
-                    light_slots.append(LightSlot(plant_id=pid, duration_minutes=float(l_best[i]), order=len(light_slots)))
-            total_utility += float(best_score)
 
-        # ── Light allocation (sequential, one plant at a time) ───────────────
-        remaining_light = constraints.light_available_minutes
-        slot_order = len(light_slots)  # account for override slots
-        for req in light_requests:
-            if remaining_light <= 0:
-                break
-            granted = min(req.requested_amount, remaining_light)
-            light_slots.append(LightSlot(
-                plant_id=req.plant_id,
-                duration_minutes=granted,
-                order=slot_order,
-            ))
-            remaining_light -= granted
-            slot_order += 1
-            total_utility += req.utility * (granted / req.requested_amount)
+            total_utility = water_utility_fn(w_best)
+
+            for i, pid in enumerate(plants):
+                if w_best[i] > 0.5:   # ignore allocations < 0.5 ml (pump noise floor)
+                    water_alloc[pid] = water_alloc.get(pid, 0.0) + float(w_best[i])
 
         decision = AllocationDecision(
             cycle_id=cycle_id,
             water_allocations=water_alloc,
-            light_schedule=light_slots,
+            light_schedule=[],          # light is never allocated
             total_utility=round(total_utility, 4),
             coordinator_notes=" | ".join(notes) if notes else "Normal allocation cycle.",
         )
 
-        # Persist decision
         await repository.insert_decision(decision.model_dump())
-        logger.info("[Coordinator] Cycle %s complete | utility=%.4f", cycle_id, total_utility)
+        logger.info(
+            "[Coordinator] Cycle %s complete | utility=%.4f | water grants=%d",
+            cycle_id, total_utility, len(water_alloc),
+        )
         return decision
+
+
+def _try_drl_water(plants, constraints, n):
+    """Attempt DRL inference. Returns w array or None on any failure."""
+    try:
+        import os
+        import numpy as np
+        from stable_baselines3 import A2C
+        model_path = os.path.join(
+            os.path.dirname(__file__), '..', 'learning', 'models', 'a2c_symbiosis_final.zip'
+        )
+        if not os.path.exists(model_path):
+            return None
+        model = A2C.load(model_path)
+        obs = []
+        for pid in plants:
+            # we can't await here — use a sync stub; DRL path is optional
+            obs.append(50.0)
+        obs.append(constraints.water_available_ml)
+        obs = np.array(obs, dtype=np.float32)
+        act, _ = model.predict(obs, deterministic=True)
+        w = np.clip(act[:n], 0.0, None)
+        if w.sum() > 0:
+            w = w / w.sum() * constraints.water_available_ml
+        return w
+    except Exception:
+        return None

@@ -41,5 +41,8 @@ class Settings(BaseSettings):
     # Simulation mode — generates fake sensor data when no Arduino is connected
     simulate_sensors: bool = False
 
+    # Trefle plant API key (optional — get free key at https://trefle.io)
+    trefle_api_key: str | None = None
+
 
 settings = Settings()
