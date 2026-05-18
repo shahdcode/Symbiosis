@@ -11,7 +11,7 @@ Citation: Advantage Actor-Critic has been applied to irrigation scheduling
 from stable_baselines3 import A2C
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import CheckpointCallback
-import gym
+import gymnasium as gym
 import numpy as np
 import os
 

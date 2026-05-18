@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.logging import setup_logging
 from app.db.connection import connect_db, close_db
 from app.core.scheduler import start_scheduler, stop_scheduler
-from app.api.routes import plants, readings, decisions, overrides, status
+from app.api.routes import plants, readings, decisions, overrides, status, disease
 from app.hardware.bridge import start_bridge, stop_bridge as stop_hw_bridge
 
 
@@ -41,7 +41,8 @@ def create_app() -> FastAPI:
     app.include_router(decisions.router)
     app.include_router(overrides.router)
     app.include_router(status.router)
-
+    app.include_router(disease.router)
+    
     @app.get("/health", tags=["health"])
     async def health():
         return {"status": "ok"}
