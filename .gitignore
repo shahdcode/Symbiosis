@@ -1,3 +1,6 @@
 backend/venv/
 backend/.env
 backend/.env
+*.pyc
+backend/.env
+/backend/app/ml/models
