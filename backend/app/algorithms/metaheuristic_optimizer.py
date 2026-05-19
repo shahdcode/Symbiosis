@@ -17,19 +17,26 @@ def optimize_water_allocations(
     utility_fn: Callable[[np.ndarray], float],
     population_size: int = 30,
     generations: int = 50,
+    max_per_plant: np.ndarray | None = None,
 ) -> Tuple[np.ndarray, float]:
     """Return (water_allocs, best_fitness).
 
     utility_fn takes a numpy array of water allocations (length n_plants)
     and returns a scalar fitness value.
+    max_per_plant: optional per-plant cap (ml). Defaults to water_budget for each plant.
     """
     if n_plants == 0 or water_budget <= 0:
         return np.zeros(max(n_plants, 1)), 0.0
 
-    def random_individual() -> np.ndarray:
-        props = np.random.dirichlet(np.ones(n_plants))
-        return props * water_budget
+    caps = max_per_plant if max_per_plant is not None else np.full(n_plants, water_budget)
+    caps = np.minimum(caps, water_budget)
 
+    def random_individual() -> np.ndarray:
+        ind = np.array([np.random.uniform(0, caps[i]) for i in range(n_plants)])
+        total = ind.sum()
+        if total > water_budget and total > 0:
+            ind = ind / total * water_budget
+        return ind
     pop = [random_individual() for _ in range(population_size)]
 
     def fitness(ind: np.ndarray) -> float:
@@ -60,13 +67,13 @@ def optimize_water_allocations(
             child[idx] *= (1.0 + random.gauss(0.0, 0.15))
 
             # repair: clip negatives then re-scale to budget
-            child = np.clip(child, 0.0, None)
+# repair: clip to [0, cap] then scale down if over budget
+            child = np.clip(child, 0.0, caps)
             total = child.sum()
-            if total > 0:
+            if total > water_budget and total > 0:
                 child = child / total * water_budget
-            else:
+            elif total == 0:
                 child = random_individual()
-
             new_pop.append(child)
 
         pop = new_pop
@@ -81,7 +88,7 @@ def optimize_water_allocations(
 
         # SA local refinement on current best — only accept if improved
         sa_candidate, sa_score = _simulated_annealing_local(
-            best, best_score, fitness, water_budget, n_plants
+            best, best_score, fitness, water_budget, n_plants, caps=caps
         )
         if sa_score > best_score:
             best = sa_candidate
@@ -106,11 +113,14 @@ def _simulated_annealing_local(
     fitness_fn: Callable,
     water_budget: float,
     n_plants: int,
+    caps: np.ndarray | None = None,
     sa_steps: int = 40,
     t_start: float = 50.0,
     t_decay: float = 0.92,
 ) -> Tuple[np.ndarray, float]:
-    """SA perturbation loop that respects the water budget constraint."""
+    """SA perturbation loop that respects the water budget and per-plant caps."""
+    if caps is None:
+        caps = np.full(n_plants, water_budget)
     ind = individual.copy()
     current_score = score
     T = t_start
@@ -127,9 +137,9 @@ def _simulated_annealing_local(
         else:
             prop[0] = water_budget
 
-        prop = np.clip(prop, 0.0, None)
+        prop = np.clip(prop, 0.0, caps)
         total = prop.sum()
-        if total > 0:
+        if total > water_budget and total > 0:
             prop = prop / total * water_budget
 
         prop_score = fitness_fn(prop)

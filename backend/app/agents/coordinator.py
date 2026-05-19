@@ -26,6 +26,7 @@ from app.core.logging import get_logger
 from app.db import repository
 from app.algorithms.metaheuristic_optimizer import optimize_water_allocations
 from app.core.config import settings
+# from backend.app.api.routes import plants
 
 logger = get_logger(__name__)
 
@@ -114,20 +115,24 @@ class CoordinatorAgent:
                         generations=settings.ga_generations,
                     )
             else:
+                plant_caps = np.array([req_map[i].requested_amount for i in range(n)], dtype=float)
                 w_best, _ = optimize_water_allocations(
                     n_plants=n,
                     water_budget=remaining_water,
                     utility_fn=water_utility_fn,
                     population_size=settings.ga_population_size,
                     generations=settings.ga_generations,
+                    max_per_plant=plant_caps,
                 )
 
             total_utility = water_utility_fn(w_best)
 
-            for i, pid in enumerate(plants):
-                if w_best[i] > 0.5:   # ignore allocations < 0.5 ml (pump noise floor)
-                    water_alloc[pid] = water_alloc.get(pid, 0.0) + float(w_best[i])
-
+        for i, pid in enumerate(plants):
+            req = req_map.get(i)
+            cap = req.requested_amount if req else float("inf")
+            granted = min(float(w_best[i]), cap)
+            if granted > 0.5:   # ignore allocations < 0.5 ml (pump noise floor)
+                water_alloc[pid] = water_alloc.get(pid, 0.0) + granted
         decision = AllocationDecision(
             cycle_id=cycle_id,
             water_allocations=water_alloc,
