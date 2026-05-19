@@ -78,11 +78,14 @@ def optimize_water_allocations(
                 best = ind.copy()
                 best_score = s
 
-        # SA local refinement on current best
-        best, best_score = _simulated_annealing_local(
+
+        # SA local refinement on current best — only accept if improved
+        sa_candidate, sa_score = _simulated_annealing_local(
             best, best_score, fitness, water_budget, n_plants
         )
-
+        if sa_score > best_score:
+            best = sa_candidate
+            best_score = sa_score
         # early stopping
         improvement = best_score - prev_best
         if improvement < 1e-6:
