@@ -9,9 +9,17 @@ Runs the full MAS allocation cycle on a configurable interval:
   5. Hardware bridge actuates
   6. Learning module updates utility params
 """
-from langsmith import unit
-
-from langsmith import unit
+"""
+Scheduler
+---------
+Runs the full MAS allocation cycle on a configurable interval:
+    1. Read sensors (hardware bridge)
+    2. Each Plant Agent generates requests
+    3. Resource Agent reports constraints
+    4. Coordinator allocates
+    5. Hardware bridge actuates
+    6. Learning module updates utility params
+"""
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.core.config import settings

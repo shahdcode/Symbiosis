@@ -27,6 +27,9 @@ class PlantProfile(BaseModel):
     plant_id: str                          # e.g. "plant_1"
     common_name: str
     species: str
+    display_name: str | None = None        # optional user-facing nickname
+    plant_type: str | None = None          # optional UI metadata (Indoor/Outdoor)
+    location: str | None = None            # optional UI metadata (Zone / shelf)
     optimal_moisture: float = Field(..., ge=0, le=100)   # % soil moisture
     moisture_min: float = 30.0             # lower safe bound (species-specific)
     moisture_max: float = 80.0             # upper safe bound

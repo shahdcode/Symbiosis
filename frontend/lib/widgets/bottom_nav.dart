@@ -39,7 +39,9 @@ class SymbiosisBottomNav extends StatelessWidget {
             active: currentIndex == 1,
             onTap: () => onTap(1),
           ),
-          _ScanButton(
+          _NavItem(
+            icon: Icons.qr_code_scanner_outlined,
+            label: 'Scan',
             active: currentIndex == 2,
             onTap: () => onTap(2),
           ),
@@ -74,78 +76,31 @@ class _NavItem extends StatelessWidget {
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              icon,
-              size: 22,
-              color: active ? AppTheme.primaryGreen : AppTheme.textMuted,
+            AnimatedScale(
+              scale: active ? 1.12 : 1.0,
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOut,
+              child: Icon(
+                icon,
+                size: active ? 24 : 22,
+                color: active ? AppTheme.primaryGreen : AppTheme.textMuted,
+              ),
             ),
             const SizedBox(height: 3),
             Text(
               label,
               style: TextStyle(
                 fontSize: 10,
-                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                fontWeight: active ? FontWeight.w700 : FontWeight.w400,
                 color: active ? AppTheme.primaryGreen : AppTheme.textMuted,
-              ),
-            ),
-            const SizedBox(height: 2),
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              width: 4,
-              height: 4,
-              decoration: BoxDecoration(
-                color: active ? AppTheme.primaryGreen : Colors.transparent,
-                shape: BoxShape.circle,
               ),
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _ScanButton extends StatelessWidget {
-  final bool active;
-  final VoidCallback onTap;
-
-  const _ScanButton({required this.active, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          AnimatedContainer(
-            duration: const Duration(milliseconds: 250),
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              color: active ? AppTheme.primaryGreen : AppTheme.lightGreen,
-              borderRadius: BorderRadius.circular(16),
-              boxShadow: active
-                  ? [
-                      BoxShadow(
-                        color: AppTheme.primaryGreen.withOpacity(0.3),
-                        blurRadius: 16,
-                        offset: const Offset(0, 4),
-                      )
-                    ]
-                  : [],
-            ),
-            child: Icon(
-              Icons.qr_code_scanner_outlined,
-              color: active ? Colors.white : AppTheme.primaryGreen,
-              size: 22,
-            ),
-          ),
-        ],
       ),
     );
   }

@@ -1,54 +1,278 @@
 import 'package:flutter/material.dart';
 import '../models/plant_model.dart';
+import '../services/backend_api.dart';
 import '../theme/app_theme.dart';
 import '../widgets/plant_painter.dart';
 import '../widgets/shared_widgets.dart';
 import 'plant_detail_screen.dart';
 
-class DashboardScreen extends StatelessWidget {
+class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
 
-  int get _avgHealth =>
-      (myPlants.fold(0, (s, p) => s + p.health) / myPlants.length).round();
+  @override
+  State<DashboardScreen> createState() => _DashboardScreenState();
+}
+
+class _DashboardScreenState extends State<DashboardScreen> {
+  final BackendApi _api = BackendApi();
+  late Future<_DashboardSnapshot> _dashboardFuture;
 
   @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: CustomScrollView(
-        physics: const BouncingScrollPhysics(),
-        slivers: [
-          SliverToBoxAdapter(child: _buildHeader()),
-          SliverToBoxAdapter(child: _buildResourceAllocation()),
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
-              child: const Text(
-                'Individual Stats',
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                  color: AppTheme.textPrimary,
-                ),
-              ),
-            ),
+  void initState() {
+    super.initState();
+    _dashboardFuture = _loadDashboard();
+  }
+
+  Future<_DashboardSnapshot> _loadDashboard() async {
+    try {
+      final backendPlants = await _api.fetchPlants();
+      final details = await Future.wait(
+        backendPlants.map((plant) async {
+          try {
+            return await _api.fetchPlantDetail(plant.plantId);
+          } catch (_) {
+            return null;
+          }
+        }),
+      );
+
+      final plants = <PlantModel>[];
+      final logEntries = <_LogEntry>[];
+      for (var i = 0; i < backendPlants.length; i++) {
+        final backendPlant = backendPlants[i];
+        final detail = details[i];
+        final plant = _toPlantModel(backendPlant, detail, i);
+        plants.add(plant);
+        logEntries.addAll(_logEntriesForPlant(plant, detail));
+      }
+
+      logEntries.sort((a, b) => b.weight.compareTo(a.weight));
+
+      final avgHealth =
+          plants.isEmpty
+              ? 0
+              : (plants.fold<int>(0, (sum, plant) => sum + plant.health) /
+                      plants.length)
+                  .round();
+      final avgWaterTank =
+          plants.isEmpty
+              ? 0
+              : (plants.fold<int>(0, (sum, plant) => sum + plant.waterTank) /
+                      plants.length)
+                  .round();
+
+      return _DashboardSnapshot(
+        plants: plants,
+        avgHealth: avgHealth,
+        waterTank: avgWaterTank,
+        logEntries:
+            logEntries.isEmpty
+                ? [
+                  const _LogEntry(
+                    time: 'now',
+                    event: 'No backend plant data yet',
+                    color: AppTheme.textMuted,
+                    weight: 0,
+                  ),
+                ]
+                : logEntries.take(4).toList(),
+      );
+    } catch (_) {
+      return _DashboardSnapshot(
+        plants: myPlants,
+        avgHealth:
+            myPlants.isEmpty
+                ? 0
+                : (myPlants.fold<int>(0, (sum, plant) => sum + plant.health) /
+                        myPlants.length)
+                    .round(),
+        waterTank:
+            myPlants.isEmpty
+                ? 0
+                : (myPlants.fold<int>(
+                          0,
+                          (sum, plant) => sum + plant.waterTank,
+                        ) /
+                        myPlants.length)
+                    .round(),
+        logEntries: const [
+          _LogEntry(
+            time: '09:41',
+            event: 'Dashboard loaded from local fallback data',
+            color: AppTheme.textMuted,
+            weight: 0,
           ),
-          SliverList(
-            delegate: SliverChildBuilderDelegate(
-              (ctx, i) => Padding(
-                padding: const EdgeInsets.fromLTRB(24, 0, 24, 10),
-                child: _PlantStatCard(plant: myPlants[i]),
-              ),
-              childCount: myPlants.length,
-            ),
-          ),
-          SliverToBoxAdapter(child: _buildAgentLog()),
-          const SliverToBoxAdapter(child: SizedBox(height: 20)),
         ],
-      ),
+      );
+    }
+  }
+
+  PlantModel _toPlantModel(
+    BackendPlant backendPlant,
+    BackendPlantDetail? detail,
+    int index,
+  ) {
+    final stats = detail?.stats;
+    final status = _statusFromString(stats?.status);
+    final palette = _paletteForIndex(index);
+    final addedWeeks = stats?.addedWeeks ?? 0;
+    final health =
+        stats?.health.round() ?? _fallbackHealth(backendPlant, index);
+    return PlantModel(
+      id: index + 1,
+      name: backendPlant.label,
+      species: backendPlant.species,
+      type: backendPlant.typeLabel,
+      status: status,
+      moisture: stats?.moisture.round() ?? backendPlant.optimalMoisture.round(),
+      humidity:
+          stats?.humidity.round() ?? backendPlant.preferredHumidityPct.round(),
+      light: stats?.light.round() ?? backendPlant.lightValue.round(),
+      temp: stats?.temp.round() ?? backendPlant.optimalTempC.round(),
+      waterTank: stats?.waterTank.round() ?? 68,
+      fertilizer: stats?.fertilizer.round() ?? 40,
+      nextWateringMinutes: stats?.nextWateringMinutes.round() ?? 60,
+      lastWatered: stats?.lastWatered ?? 'Unknown',
+      addedWeeks: addedWeeks > 0 ? addedWeeks : index + 1,
+      health: health,
+      description:
+          backendPlant.notes?.trim().isNotEmpty == true
+              ? backendPlant.notes!.trim()
+              : 'Live backend snapshot for ${backendPlant.label}.',
+      idealConditions: {
+        'Moisture':
+            '${backendPlant.moistureMin.round()}–${backendPlant.moistureMax.round()}%',
+        'Humidity':
+            '${backendPlant.humidityMin.round()}–${backendPlant.humidityMax.round()}%',
+        'Light': 'Ellenberg ${backendPlant.lightValue.toStringAsFixed(1)}',
+        'Temperature':
+            '${backendPlant.tempMinC.round()}–${backendPlant.tempMaxC.round()}°C',
+        'Watering': '${stats?.nextWateringMinutes.round() ?? 60} min',
+      },
+      color: palette.$1,
+      lightColor: palette.$2,
+      svgType: backendPlant.svgType,
     );
   }
 
-  Widget _buildHeader() {
+  int _fallbackHealth(BackendPlant plant, int index) {
+    final score = 70 + (plant.optimalMoisture / 5).round() - index * 2;
+    return score.clamp(55, 96);
+  }
+
+  PlantStatus _statusFromString(String? status) {
+    switch ((status ?? '').toLowerCase()) {
+      case 'thriving':
+        return PlantStatus.thriving;
+      case 'attention':
+        return PlantStatus.attention;
+      default:
+        return PlantStatus.resting;
+    }
+  }
+
+  (Color, Color) _paletteForIndex(int index) {
+    const palettes = [
+      (Color(0xFF2D5A27), Color(0xFFE8F5E3)),
+      (Color(0xFF1A6B3A), Color(0xFFE0F4EA)),
+      (Color(0xFF3D6B1A), Color(0xFFEBF5E0)),
+      (Color(0xFF2A5C3F), Color(0xFFE2F0EB)),
+      (Color(0xFF8B5E34), Color(0xFFF8EDE3)),
+    ];
+    return palettes[index % palettes.length];
+  }
+
+  List<_LogEntry> _logEntriesForPlant(
+    PlantModel plant,
+    BackendPlantDetail? detail,
+  ) {
+    final stats = detail?.stats;
+    final entries = <_LogEntry>[];
+    if (stats != null) {
+      entries.add(
+        _LogEntry(
+          time: 'now',
+          event:
+              '${plant.name} synced: ${stats.health.round()}% health, ${stats.moisture.round()}% moisture',
+          color: stats.health < 70 ? AppTheme.warning : AppTheme.success,
+          weight: stats.health,
+        ),
+      );
+      if (stats.waterTank < 20) {
+        entries.add(
+          _LogEntry(
+            time: 'now',
+            event:
+                '${plant.name} water tank low — ${stats.waterTank.round()}% remaining',
+            color: AppTheme.danger,
+            weight: 100 - stats.waterTank,
+          ),
+        );
+      }
+      return entries;
+    }
+
+    entries.add(
+      _LogEntry(
+        time: 'now',
+        event: '${plant.name} loaded from backend profile',
+        color: AppTheme.primaryGreen,
+        weight: plant.health.toDouble(),
+      ),
+    );
+    return entries;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<_DashboardSnapshot>(
+      future: _dashboardFuture,
+      builder: (context, snapshot) {
+        final data = snapshot.data ?? _DashboardSnapshot.fallback();
+        final loading = snapshot.connectionState != ConnectionState.done;
+
+        return SafeArea(
+          child: CustomScrollView(
+            physics: const BouncingScrollPhysics(),
+            slivers: [
+              if (loading)
+                const SliverToBoxAdapter(
+                  child: LinearProgressIndicator(minHeight: 2),
+                ),
+              SliverToBoxAdapter(child: _buildHeader(data)),
+              SliverToBoxAdapter(child: _buildResourceAllocation(data)),
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
+                  child: const Text(
+                    'Individual Stats',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.textPrimary,
+                    ),
+                  ),
+                ),
+              ),
+              SliverList(
+                delegate: SliverChildBuilderDelegate(
+                  (ctx, i) => Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 0, 24, 10),
+                    child: _PlantStatCard(plant: data.plants[i]),
+                  ),
+                  childCount: data.plants.length,
+                ),
+              ),
+              SliverToBoxAdapter(child: _buildAgentLog(data)),
+              const SliverToBoxAdapter(child: SizedBox(height: 20)),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildHeader(_DashboardSnapshot data) {
     return Container(
       color: AppTheme.deepGreen,
       padding: const EdgeInsets.fromLTRB(24, 16, 24, 28),
@@ -77,11 +301,11 @@ class DashboardScreen extends StatelessWidget {
           const SizedBox(height: 16),
           Row(
             children: [
-              _DarkStat(val: '$_avgHealth%', label: 'Avg Health'),
+              _DarkStat(val: '${data.avgHealth}%', label: 'Avg Health'),
               const SizedBox(width: 8),
-              _DarkStat(val: '${myPlants.length}', label: 'Plants'),
+              _DarkStat(val: '${data.plants.length}', label: 'Plants'),
               const SizedBox(width: 8),
-              _DarkStat(val: '68%', label: 'Water Tank'),
+              _DarkStat(val: '${data.waterTank}%', label: 'Water Tank'),
             ],
           ),
         ],
@@ -89,7 +313,11 @@ class DashboardScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildResourceAllocation() {
+  Widget _buildResourceAllocation(_DashboardSnapshot data) {
+    final plantNames =
+        data.plants.isEmpty
+            ? ['No plants']
+            : data.plants.map((plant) => plant.name).toList();
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
       child: Column(
@@ -115,8 +343,8 @@ class DashboardScreen extends StatelessWidget {
               children: [
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: const [
-                    Text(
+                  children: [
+                    const Text(
                       'Water Distribution',
                       style: TextStyle(
                         fontSize: 12,
@@ -125,8 +353,8 @@ class DashboardScreen extends StatelessWidget {
                       ),
                     ),
                     Text(
-                      '4 paths active',
-                      style: TextStyle(
+                      '${data.plants.length} paths active',
+                      style: const TextStyle(
                         fontSize: 12,
                         color: AppTheme.primaryGreen,
                         fontWeight: FontWeight.w600,
@@ -137,31 +365,43 @@ class DashboardScreen extends StatelessWidget {
                 const SizedBox(height: 6),
                 Row(
                   children:
-                      myPlants
-                          .map(
-                            (p) => Expanded(
+                      data.plants.isEmpty
+                          ? [
+                            Expanded(
                               child: Container(
-                                margin: const EdgeInsets.symmetric(
-                                  horizontal: 1.5,
-                                ),
                                 height: 8,
                                 decoration: BoxDecoration(
-                                  color: p.color.withOpacity(0.75),
+                                  color: AppTheme.border,
                                   borderRadius: BorderRadius.circular(99),
                                 ),
                               ),
                             ),
-                          )
-                          .toList(),
+                          ]
+                          : data.plants
+                              .map(
+                                (p) => Expanded(
+                                  child: Container(
+                                    margin: const EdgeInsets.symmetric(
+                                      horizontal: 1.5,
+                                    ),
+                                    height: 8,
+                                    decoration: BoxDecoration(
+                                      color: p.color.withValues(alpha: 0.75),
+                                      borderRadius: BorderRadius.circular(99),
+                                    ),
+                                  ),
+                                ),
+                              )
+                              .toList(),
                 ),
                 const SizedBox(height: 3),
                 Row(
                   children:
-                      myPlants
+                      plantNames
                           .map(
-                            (p) => Expanded(
+                            (name) => Expanded(
                               child: Text(
-                                p.name.substring(0, 3),
+                                name.length > 3 ? name.substring(0, 3) : name,
                                 textAlign: TextAlign.center,
                                 style: const TextStyle(
                                   fontSize: 9,
@@ -175,8 +415,8 @@ class DashboardScreen extends StatelessWidget {
                 const Divider(color: Color(0xFFE5E7EB), height: 20),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: const [
-                    Text(
+                  children: [
+                    const Text(
                       'LED Position',
                       style: TextStyle(
                         fontSize: 12,
@@ -185,8 +425,8 @@ class DashboardScreen extends StatelessWidget {
                       ),
                     ),
                     Text(
-                      'Zone A (Monstera)',
-                      style: TextStyle(
+                      'Zone A (${data.plants.isNotEmpty ? data.plants.first.name : 'No plants'})',
+                      style: const TextStyle(
                         fontSize: 12,
                         color: Color(0xFFD97706),
                         fontWeight: FontWeight.w600,
@@ -195,43 +435,47 @@ class DashboardScreen extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 6),
-                Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    Container(
-                      height: 8,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFE5E7EB),
-                        borderRadius: BorderRadius.circular(99),
-                      ),
-                    ),
-                    Positioned(
-                      left:
-                          ((navigatorKey.currentContext != null)
-                                  ? MediaQuery.of(
-                                    navigatorKey.currentContext!,
-                                  ).size.width
-                                  : 375.0) *
-                              0.2 -
-                          40,
-                      top: -4,
-                      child: Container(
-                        width: 16,
-                        height: 16,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFFCD34D),
-                          shape: BoxShape.circle,
-                          border: Border.all(color: Colors.white, width: 3),
-                          boxShadow: [
-                            BoxShadow(
-                              color: const Color(0xFFFCD34D).withOpacity(0.5),
-                              blurRadius: 10,
-                            ),
-                          ],
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final width =
+                        constraints.maxWidth.isFinite &&
+                                constraints.maxWidth > 0
+                            ? constraints.maxWidth
+                            : 375.0;
+                    return Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        Container(
+                          height: 8,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFE5E7EB),
+                            borderRadius: BorderRadius.circular(99),
+                          ),
                         ),
-                      ),
-                    ),
-                  ],
+                        Positioned(
+                          left: width * 0.2 - 40,
+                          top: -4,
+                          child: Container(
+                            width: 16,
+                            height: 16,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFCD34D),
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white, width: 3),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: const Color(
+                                    0xFFFCD34D,
+                                  ).withValues(alpha: 0.5),
+                                  blurRadius: 10,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
                 ),
                 const SizedBox(height: 3),
                 Row(
@@ -263,29 +507,7 @@ class DashboardScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildAgentLog() {
-    final logs = [
-      _LogEntry(
-        time: '09:41',
-        event: 'Coordinator allocated water to Calathea (urgency: 0.87)',
-        color: AppTheme.danger,
-      ),
-      _LogEntry(
-        time: '09:28',
-        event: 'LED shifted to Zone B — Fiddle Leaf entered growth phase',
-        color: AppTheme.warning,
-      ),
-      _LogEntry(
-        time: '08:55',
-        event: 'Peace Lily agent reported stable — no action required',
-        color: AppTheme.success,
-      ),
-      _LogEntry(
-        time: '08:12',
-        event: 'Adaptive model updated Monstera moisture coefficient',
-        color: const Color(0xFF7C3AED),
-      ),
-    ];
+  Widget _buildAgentLog(_DashboardSnapshot data) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
       child: Column(
@@ -308,82 +530,60 @@ class DashboardScreen extends StatelessWidget {
             ),
             child: Column(
               children:
-                  logs
-                      .asMap()
-                      .entries
-                      .map(
-                        (e) => Column(
+                  data.logEntries.asMap().entries.map((e) {
+                    return Column(
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Padding(
-                                  padding: const EdgeInsets.only(top: 5),
-                                  child: Container(
-                                    width: 6,
-                                    height: 6,
-                                    decoration: BoxDecoration(
-                                      color: e.value.color,
-                                      shape: BoxShape.circle,
+                            Padding(
+                              padding: const EdgeInsets.only(top: 5),
+                              child: Container(
+                                width: 6,
+                                height: 6,
+                                decoration: BoxDecoration(
+                                  color: e.value.color,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    e.value.event,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: AppTheme.textPrimary,
+                                      height: 1.4,
                                     ),
                                   ),
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        e.value.event,
-                                        style: const TextStyle(
-                                          fontSize: 12,
-                                          color: AppTheme.textPrimary,
-                                          height: 1.4,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 2),
-                                      Text(
-                                        '${e.value.time} AM',
-                                        style: const TextStyle(
-                                          fontSize: 10,
-                                          color: AppTheme.textMuted,
-                                        ),
-                                      ),
-                                    ],
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    e.value.time,
+                                    style: const TextStyle(
+                                      fontSize: 10,
+                                      color: AppTheme.textMuted,
+                                    ),
                                   ),
-                                ),
-                              ],
-                            ),
-                            if (e.key < logs.length - 1)
-                              const Divider(
-                                color: Color(0xFFE5E7EB),
-                                height: 20,
+                                ],
                               ),
+                            ),
                           ],
                         ),
-                      )
-                      .toList(),
+                        if (e.key < data.logEntries.length - 1)
+                          const Divider(color: Color(0xFFE5E7EB), height: 20),
+                      ],
+                    );
+                  }).toList(),
             ),
           ),
         ],
       ),
     );
   }
-}
-
-// Hack to get a build context for the LED indicator width
-// In a real app, use LayoutBuilder instead
-final navigatorKey = GlobalKey<NavigatorState>();
-final _fakeCtx = navigatorKey.currentContext;
-
-extension on Null {
-  get size => const _FakeSize();
-}
-
-class _FakeSize {
-  double get width => 375;
-  const _FakeSize();
 }
 
 class _DarkStat extends StatelessWidget {
@@ -397,7 +597,7 @@ class _DarkStat extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.08),
+          color: Colors.white.withValues(alpha: 0.08),
           borderRadius: BorderRadius.circular(12),
         ),
         child: Column(
@@ -416,7 +616,7 @@ class _DarkStat extends StatelessWidget {
               label.toUpperCase(),
               style: TextStyle(
                 fontSize: 10,
-                color: Colors.white.withOpacity(0.5),
+                color: Colors.white.withValues(alpha: 0.5),
                 letterSpacing: 0.5,
               ),
             ),
@@ -431,11 +631,53 @@ class _LogEntry {
   final String time;
   final String event;
   final Color color;
+  final double weight;
   const _LogEntry({
     required this.time,
     required this.event,
     required this.color,
+    required this.weight,
   });
+}
+
+class _DashboardSnapshot {
+  final List<PlantModel> plants;
+  final int avgHealth;
+  final int waterTank;
+  final List<_LogEntry> logEntries;
+
+  const _DashboardSnapshot({
+    required this.plants,
+    required this.avgHealth,
+    required this.waterTank,
+    required this.logEntries,
+  });
+
+  factory _DashboardSnapshot.fallback() {
+    return _DashboardSnapshot(
+      plants: myPlants,
+      avgHealth:
+          myPlants.isEmpty
+              ? 0
+              : (myPlants.fold<int>(0, (sum, plant) => sum + plant.health) /
+                      myPlants.length)
+                  .round(),
+      waterTank:
+          myPlants.isEmpty
+              ? 0
+              : (myPlants.fold<int>(0, (sum, plant) => sum + plant.waterTank) /
+                      myPlants.length)
+                  .round(),
+      logEntries: const [
+        _LogEntry(
+          time: 'now',
+          event: 'Using local fallback dashboard data',
+          color: AppTheme.textMuted,
+          weight: 0,
+        ),
+      ],
+    );
+  }
 }
 
 class _PlantStatCard extends StatelessWidget {

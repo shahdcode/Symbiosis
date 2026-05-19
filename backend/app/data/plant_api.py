@@ -282,3 +282,44 @@ def query_plant_by_scientific_name(scientific_name: str) -> PlantProfile | None:
 
     logger.warning("No profile found for '%s'", scientific_name)
     return None
+
+
+_LIBRARY_SEEDS = [
+    "Monstera deliciosa",
+    "Epipremnum aureum",
+    "Dracaena trifasciata",
+    "Calathea orbifolia",
+    "Ficus lyrata",
+    "Spathiphyllum wallisii",
+    "Zamioculcas zamiifolia",
+    "Strelitzia reginae",
+    "Ficus elastica",
+    "Alocasia amazonica",
+    "Peperomia obtusifolia",
+    "Asplenium nidus",
+    "Philodendron hederaceum",
+    "Chlorophytum comosum",
+    "Sansevieria cylindrica",
+    "Hoya carnosa",
+]
+
+
+def query_plant_library(limit: int = 12) -> list[PlantProfile]:
+    """Return a curated subset of plant profiles for the public library UI.
+
+    The list is intentionally small and curated so the explore page stays
+    responsive while still surfacing real Trefle-backed plant profiles when the
+    API key is available.
+    """
+    safe_limit = max(1, min(limit, len(_LIBRARY_SEEDS)))
+    profiles: list[PlantProfile] = []
+
+    for seed in _LIBRARY_SEEDS:
+        if len(profiles) >= safe_limit:
+            break
+        profile = query_plant_by_scientific_name(seed)
+        if profile is None:
+            continue
+        profiles.append(profile)
+
+    return profiles
