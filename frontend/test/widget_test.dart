@@ -14,7 +14,7 @@ void main() {
   testWidgets('renders the garden dashboard shell', (
     WidgetTester tester,
   ) async {
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(const SymbiosisApp());
     await tester.pump(const Duration(milliseconds: 16));
 
     expect(find.text('Garden Overview'), findsOneWidget);
