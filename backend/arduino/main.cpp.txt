@@ -1,0 +1,196 @@
+/*
+ * ============================================================
+ *  SMART IRRIGATION — FULL SENSOR + ACTUATOR TEST
+ *  Board: ESP32 Dev Module
+ *
+ *  Sensors:
+ *   - Soil Moisture 1  (GPIO34)
+ *   - Soil Moisture 2  (GPIO35)
+ *   - LDR              (GPIO36)
+ *   - DHT11            (GPIO4)
+ *   - HC-SR04          (TRIG=GPIO5, ECHO=GPIO18)
+ *
+ *  Actuators:
+ *   - Servo MG996R     (GPIO13)
+ *   - Relay Pump       (GPIO26)  → IN4 rightmost
+ *   - Relay Valve 1    (GPIO27)  → IN2
+ *   - Relay Valve 2    (GPIO14)  → IN3
+ *
+ *  Open Serial Monitor at 115200
+ * ============================================================
+ */
+
+#include <Arduino.h>
+#include <DHT.h>
+#include <ESP32Servo.h>
+
+// ── Pins ─────────────────────────────────────────────────────
+#define SOIL1_PIN     34
+#define SOIL2_PIN     35
+#define LDR_PIN       36
+#define DHT_PIN        4
+#define DHT_TYPE   DHT11
+#define TRIG_PIN       5
+#define ECHO_PIN      18
+#define SERVO_PIN     13
+#define RELAY_PUMP    26
+#define RELAY_VALVE1  27
+#define RELAY_VALVE2  14
+
+// ── Objects ──────────────────────────────────────────────────
+DHT   dht(DHT_PIN, DHT_TYPE);
+Servo myServo;
+
+// ── Helpers ──────────────────────────────────────────────────
+float readDistance() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+  if (duration == 0) return -1;
+  return duration * 0.034 / 2.0;
+}
+
+int soilPercent(int raw) {
+  return map(constrain(raw, 0, 4095), 4095, 0, 0, 100);
+}
+
+void setPump(bool state) {
+  digitalWrite(RELAY_PUMP, state ? LOW : HIGH);
+  Serial.printf("  Pump    : %s (GPIO26)\n", state ? "ON " : "OFF");
+}
+
+void setValve1(bool state) {
+  digitalWrite(RELAY_VALVE1, state ? LOW : HIGH);
+  Serial.printf("  Valve 1 : %s (GPIO27)\n", state ? "ON " : "OFF");
+}
+
+void setValve2(bool state) {
+  digitalWrite(RELAY_VALVE2, state ? LOW : HIGH);
+  Serial.printf("  Valve 2 : %s (GPIO14)\n", state ? "ON " : "OFF");
+}
+
+void setServo(int angle) {
+  myServo.write(angle);
+  Serial.printf("  Servo   : %d deg (GPIO13)\n", angle);
+}
+
+void divider() {
+  Serial.println(F("────────────────────────────────────────"));
+}
+
+// ── Setup ────────────────────────────────────────────────────
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  dht.begin();
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  ESP32PWM::allocateTimer(0);
+  myServo.setPeriodHertz(50);
+  myServo.attach(SERVO_PIN, 500, 2400);
+
+  // Relays OFF at boot
+  pinMode(RELAY_PUMP,   OUTPUT); digitalWrite(RELAY_PUMP,   HIGH);
+  pinMode(RELAY_VALVE1, OUTPUT); digitalWrite(RELAY_VALVE1, HIGH);
+  pinMode(RELAY_VALVE2, OUTPUT); digitalWrite(RELAY_VALVE2, HIGH);
+
+  myServo.write(0);
+
+  Serial.println();
+  Serial.println(F("╔══════════════════════════════════════════╗"));
+  Serial.println(F("║   SMART IRRIGATION — FULL TEST MODE      ║"));
+  Serial.println(F("╚══════════════════════════════════════════╝"));
+  Serial.println();
+  delay(2000);
+}
+
+// ── Main Loop ────────────────────────────────────────────────
+void loop() {
+
+  // ════════════════════════════════════════
+  //  SECTION 1 — SENSOR READINGS
+  // ════════════════════════════════════════
+  divider();
+  Serial.println(F("📡 SENSOR READINGS"));
+  divider();
+
+  // Soil 1
+  int soil1Raw = analogRead(SOIL1_PIN);
+  int soil1Pct = soilPercent(soil1Raw);
+  Serial.printf("  Soil 1      : %3d%%  (raw=%4d)  [GPIO34]", soil1Pct, soil1Raw);
+  if      (soil1Pct < 20)  Serial.println(F("  ← VERY DRY"));
+  else if (soil1Pct < 40)  Serial.println(F("  ← DRY"));
+  else if (soil1Pct < 70)  Serial.println(F("  ← MOIST ✓"));
+  else                     Serial.println(F("  ← WET"));
+
+  // Soil 2
+  int soil2Raw = analogRead(SOIL2_PIN);
+  int soil2Pct = soilPercent(soil2Raw);
+  Serial.printf("  Soil 2      : %3d%%  (raw=%4d)  [GPIO35]", soil2Pct, soil2Raw);
+  if      (soil2Pct < 20)  Serial.println(F("  ← VERY DRY"));
+  else if (soil2Pct < 40)  Serial.println(F("  ← DRY"));
+  else if (soil2Pct < 70)  Serial.println(F("  ← MOIST ✓"));
+  else                     Serial.println(F("  ← WET"));
+
+  // LDR
+  int ldrRaw = analogRead(LDR_PIN);
+  int ldrPct = map(ldrRaw, 0, 4095, 0, 100);
+  Serial.printf("  Light (LDR) : %3d%%  (raw=%4d)  [GPIO36]", ldrPct, ldrRaw);
+  if      (ldrPct < 20)  Serial.println(F("  ← DARK"));
+  else if (ldrPct < 60)  Serial.println(F("  ← DIM"));
+  else                   Serial.println(F("  ← BRIGHT"));
+
+  // DHT11
+  delay(2000);
+  float temperature = dht.readTemperature();
+  float humidity    = dht.readHumidity();
+
+  if (!isnan(temperature))
+    Serial.printf("  Temperature : %.1f C  [GPIO4]\n", temperature);
+  else
+    Serial.println(F("  Temperature : ❌ ERROR — check DHT11 wiring [GPIO4]"));
+
+  if (!isnan(humidity))
+    Serial.printf("  Humidity    : %.1f %%  [GPIO4]\n", humidity);
+  else
+    Serial.println(F("  Humidity    : ❌ ERROR — check DHT11 wiring [GPIO4]"));
+
+  // Ultrasonic
+  float dist = readDistance();
+  if (dist > 0)
+    Serial.printf("  Water Level : %.1f cm  [TRIG=GPIO5, ECHO=GPIO18]\n", dist);
+  else
+    Serial.println(F("  Water Level : ❌ No echo — check HC-SR04 wiring"));
+
+  // ════════════════════════════════════════
+  //  SECTION 2 — ACTUATOR TEST CYCLE
+  // ════════════════════════════════════════
+  Serial.println();
+  divider();
+  Serial.println(F("⚙ ACTUATOR TEST — ALL ON"));
+  divider();
+  setPump(true);
+  setValve1(true);
+  setValve2(true);
+  setServo(90);
+  delay(5000);
+
+  divider();
+  Serial.println(F("⚙ ACTUATOR TEST — ALL OFF"));
+  divider();
+  setPump(false);
+  setValve1(false);
+  setValve2(false);
+  setServo(0);
+
+  Serial.println();
+  Serial.println(F("⏳ Next cycle in 5 seconds..."));
+  Serial.println();
+  delay(5000);
+}
