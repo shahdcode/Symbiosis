@@ -1,5 +1,5 @@
 """Hybrid GA + SA optimizer for water allocation.
-
+backend/app/algorithms/metaheuristic_optimizer.py
 Allocates water (ml) to N plants subject to a total water budget.
 Light is informational only and is NOT allocated here.
 

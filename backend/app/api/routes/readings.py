@@ -1,3 +1,4 @@
+# backend/app/api/routes/readings.py
 from fastapi import APIRouter, HTTPException
 from app.db import repository
 from app.models.domain import SensorReading

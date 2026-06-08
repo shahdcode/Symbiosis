@@ -1,5 +1,5 @@
 """Serial bridge: JSON-lines over USB serial to Arduino.
-
+backend/app/hardware/serial_bridge.py
 This is a lightweight, non-blocking bridge using `pyserial` that reads
 JSON lines from the Arduino and exposes a callback for processed readings.
 Commands can be sent via `send_command`.

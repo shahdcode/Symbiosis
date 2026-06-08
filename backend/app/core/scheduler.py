@@ -1,5 +1,6 @@
 """
 Scheduler
+backend/app/core/scheduler.py
 ---------
 Runs the full MAS allocation cycle on a configurable interval:
   1. Read sensors (hardware bridge)
@@ -21,14 +22,16 @@ Runs the full MAS allocation cycle on a configurable interval:
     6. Learning module updates utility params
 """
 
+import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.core.config import settings
+from app.core.file_logger import log_sensor_csv
 from app.core.logging import get_logger
 from app.db import repository
 from app.agents.plant_agent import PlantAgent
 from app.agents.resource_agent import ResourceAgent
 from app.agents.coordinator import CoordinatorAgent
-from app.hardware.bridge import read_sensors, actuate_water, actuate_light
+from app.hardware.bridge import read_sensors, actuate_water, actuate_light, actuate_servo_lid
 from app.learning.utility_learner import update_utility_params
 from app.models.domain import PlantProfile
 
@@ -55,13 +58,14 @@ async def allocation_cycle() -> None:
         logger.info("Plants loaded: %s", plant_names)
 
         readings = read_sensors()
+        log_sensor_csv(readings)
         all_requests = []
 
         for reading in readings:
             await repository.insert_reading(reading.model_dump())
 
             if reading.plant_id not in profiles:
-                logger.warning("No profile for %s — skipping", reading.plant_id)
+                logger.debug("No profile for %s — skipping", reading.plant_id)
                 continue
 
             _resource_agent.update_plant_ekf(reading.plant_id, reading.moisture_pct,
@@ -137,6 +141,28 @@ async def allocation_cycle() -> None:
         for plant_id, ml in decision.water_allocations.items():
             actuate_water(plant_id, ml)
             _resource_agent.consume_water(ml)
+
+        # Humidity-based lid control (2 plants only)
+        LID_OPEN_ANGLE = 90
+        LID_CLOSED_ANGLE = 0
+        VENT_DURATION_SEC = 30
+        lid_opened = False
+        for reading in readings:
+            profile = profiles.get(reading.plant_id)
+            if profile and reading.humidity_pct is not None:
+                hum_max = getattr(profile, "humidity_max", 75.0)
+                if reading.humidity_pct > hum_max:
+                    logger.warning(
+                        "💨 High humidity (%.1f%%) for %s – opening lid for %d sec",
+                        reading.humidity_pct, reading.plant_id, VENT_DURATION_SEC
+                    )
+                    actuate_servo_lid(LID_OPEN_ANGLE)
+                    await asyncio.sleep(VENT_DURATION_SEC)
+                    actuate_servo_lid(LID_CLOSED_ANGLE)
+                    lid_opened = True
+                    break
+        if not lid_opened:
+            actuate_servo_lid(LID_CLOSED_ANGLE)
 
         # Learning
         logger.info("─" * 40)

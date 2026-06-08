@@ -1,5 +1,5 @@
 """Serial-backed hardware bridge.
-
+backend/app/hardware/bridge.py
 Uses `app.hardware.serial_bridge` to manage a serial connection to the
 Arduino. Exposes `start_bridge`, `stop_bridge`, `read_sensors`, and
 actuation functions used by the scheduler.
@@ -83,8 +83,8 @@ def read_sensors() -> list[SensorReading]:
     if not settings.simulate_sensors:
         return []
 
-    # Simulated plant IDs — must match what's seeded in the DB
-    sim_plant_ids = ["plant_1", "plant_2", "plant_3", "plant_4", "plant_5"]
+    # Simulated plant IDs — only the two real plants in hardware
+    sim_plant_ids = ["plant_1", "plant_2"]
     readings = []
     for pid in sim_plant_ids:
         # Drift moisture down slowly, simulate different stress levels
