@@ -126,6 +126,10 @@ class CoordinatorAgent:
                 )
 
             total_utility = water_utility_fn(w_best)
+        else:
+            plants = []
+            w_best = np.array([], dtype=float)
+            total_utility = 0.0
 
         for i, pid in enumerate(plants):
             req = req_map.get(i)
