@@ -31,11 +31,16 @@ class SerialBridgeProtocol(asyncio.Protocol):
         self._buffer += data
         while b"\n" in self._buffer:
             line, self._buffer = self._buffer.split(b"\n", 1)
+            stripped = line.decode('utf-8', errors='replace').strip()
+            if not stripped:
+                continue
             try:
-                msg = json.loads(line.decode('utf-8').strip())
+                msg = json.loads(stripped)
                 self.on_message(msg)
+            except json.JSONDecodeError:
+                logger.debug("Non-JSON serial line (ignored): %s", stripped)
             except Exception as e:
-                logger.exception("Failed to parse serial line: %s", e)
+                logger.warning("Serial parse error: %s — line: %s", e, stripped)
 
     def send_command(self, obj: dict):
         if self.transport is None:

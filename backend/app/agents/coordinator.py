@@ -103,6 +103,12 @@ class CoordinatorAgent:
                     total += uw
                 return total
 
+            # Prepare defaults so downstream code can always iterate
+            plants: list[str] = []
+            w_best = np.zeros(0)
+            req_map: dict = {}
+            n = 0
+
             # DRL fast-path (optional, falls back to metaheuristic)
             if settings.use_drl:
                 w_best = _try_drl_water(plants, constraints, n)

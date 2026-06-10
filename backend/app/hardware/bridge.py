@@ -2,11 +2,64 @@
 import logging
 from app.core.config import settings
 from app.models.domain import SensorReading
-import simple_serial
+from app.core.logging import get_logger
+from app.hardware.serial_bridge import open_serial, SerialBridgeProtocol
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
-_serial_started = False
+# Holds latest sensor messages keyed by plant_id
+_latest_readings: dict[str, SensorReading] = {}
+
+# Serial protocol instance
+_serial_protocol: Optional[SerialBridgeProtocol] = None
+_serial_transport = None
+
+# Reference to the ResourceAgent — set by scheduler on startup
+_resource_agent = None
+
+def set_resource_agent(agent) -> None:
+    global _resource_agent
+    _resource_agent = agent
+
+
+def _on_serial_message(msg: dict):
+    """Callback for incoming parsed JSON messages from Arduino."""
+    try:
+        # ── Hardware event confirmations ──────────────────────────────
+        if msg.get("event") in ("water_delivered", "lid_moved", "lid_auto_closed"):
+            logger.info("Hardware event: %s", msg)
+            return
+
+        # ── Sensor readings ───────────────────────────────────────────
+        if 'plant_id' in msg:
+            tank_raw = msg.get('tank_level')
+            # Update tank level from ultrasonic sensor if available
+            # tank_raw is distance in cm; convert to ml using tank geometry
+            # Assumes cylindrical tank: 20 cm diameter → ~314 cm² cross-section
+            # Adjust TANK_CROSS_SECTION_CM2 and TANK_MAX_HEIGHT_CM for your tank
+            if tank_raw is not None and tank_raw > 0 and _resource_agent is not None:
+                TANK_MAX_HEIGHT_CM = 20.0
+                TANK_CROSS_SECTION_CM2 = 314.0   # π * r² for r=10 cm
+                depth_cm = max(0.0, TANK_MAX_HEIGHT_CM - float(tank_raw))
+                level_ml = depth_cm * TANK_CROSS_SECTION_CM2
+                try:
+                    _resource_agent.update_tank_level(level_ml)
+                except Exception:
+                    logger.exception("Failed to update resource agent tank level")
+
+            sr = SensorReading(
+                plant_id=msg.get('plant_id'),
+                moisture_pct=float(msg.get('moisture', 0.0)),
+                light_lux=float(msg.get('light', 0.0)),
+                temperature_c=float(msg.get('temperature')) if msg.get('temperature') is not None else None,
+                humidity_pct=float(msg.get('humidity')) if msg.get('humidity') is not None else None,
+                sensor_ok=True,
+            )
+            _latest_readings[sr.plant_id] = sr
+            logger.debug("Received sensor reading for %s: moisture=%.1f%%", sr.plant_id, sr.moisture_pct)
+    except Exception as e:
+        logger.exception("Failed to handle serial message: %s", e)
+
 
 async def start_bridge():
     global _serial_started

@@ -24,6 +24,10 @@
 
 DHT dht(DHT_PIN, DHT_TYPE);
 Servo lidServo;
+// Lid auto-close tracking
+static unsigned long lidOpenedAt = 0;
+static bool lidIsOpen = false;
+const unsigned long LID_OPEN_DURATION_MS = 60000UL;  // 60 seconds open
 
 // ========== Helper Functions ==========
 float readDistance() {
@@ -68,13 +72,19 @@ void actuateWater(const char* plant, float ml) {
   digitalWrite(PUMP_RELAY, HIGH);
   digitalWrite(VALVE1_RELAY, HIGH);
   digitalWrite(VALVE2_RELAY, HIGH);
-  Serial.printf("Water delivered: %s %.1f ml\n", plant, ml);
+  Serial.printf("{\"event\":\"water_delivered\",\"plant\":\"%s\",\"ml\":%.1f}\n", plant, ml);
 }
 
 void actuateLid(int angle) {
   lidServo.write(angle);
-  delay(500);
-  Serial.printf("Lid moved to %d°\n", angle);
+  delay(1000);   // give servo time to reach position
+  Serial.printf("{\"event\":\"lid_moved\",\"angle\":%d}\n", angle);
+  if (angle > 0) {
+    lidIsOpen = true;
+    lidOpenedAt = millis();
+  } else {
+    lidIsOpen = false;
+  }
 }
 
 // ========== Command Parser ==========
@@ -118,7 +128,7 @@ void loop() {
   static unsigned long lastSend = 0;
   unsigned long now = millis();
 
-  if (now - lastSend >= 5000) {
+  if (now - lastSend >= 30000) {   // was 5000 — now 30 seconds
     lastSend = now;
 
     int soil1 = soilPercent(analogRead(SOIL1_PIN));
@@ -135,6 +145,13 @@ void loop() {
   if (Serial.available()) {
     String line = Serial.readStringUntil('\n');
     handleSerialCommand(line);
+  }
+
+  // Auto-close lid if it has been open for longer than configured
+  if (lidIsOpen && (now - lidOpenedAt >= LID_OPEN_DURATION_MS)) {
+    lidServo.write(0);
+    lidIsOpen = false;
+    Serial.println("{\"event\":\"lid_auto_closed\"}");
   }
 
   delay(10);

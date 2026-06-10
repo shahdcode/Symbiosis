@@ -23,15 +23,17 @@ Runs the full MAS allocation cycle on a configurable interval:
 """
 
 import asyncio
+import time
+from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.core.config import settings
-from app.core.file_logger import log_sensor_csv
+from app.core.file_logger import log_sensor_csv, log_cycle
 from app.core.logging import get_logger
 from app.db import repository
 from app.agents.plant_agent import PlantAgent
 from app.agents.resource_agent import ResourceAgent
 from app.agents.coordinator import CoordinatorAgent
-from app.hardware.bridge import read_sensors, actuate_water, actuate_light, actuate_servo_lid
+from app.hardware.bridge import read_sensors, actuate_water, actuate_light, actuate_servo_lid, set_resource_agent
 from app.learning.utility_learner import update_utility_params
 from app.models.domain import PlantProfile
 
@@ -103,8 +105,10 @@ async def allocation_cycle() -> None:
         if constraints.tank_critical:
             logger.warning("⚠️  Tank critical — water requests suppressed this cycle")
 
-        # Coordinator allocates
+        # Coordinator allocates (measure optimisation latency)
+        t0 = time.monotonic()
         decision = await _coordinator.allocate(all_requests, constraints)
+        opt_latency_ms = (time.monotonic() - t0) * 1000.0
 
         # Log what was granted
         logger.info("─" * 40)
@@ -142,27 +146,23 @@ async def allocation_cycle() -> None:
             actuate_water(plant_id, ml)
             _resource_agent.consume_water(ml)
 
-        # Humidity-based lid control (2 plants only)
-        LID_OPEN_ANGLE = 90
-        LID_CLOSED_ANGLE = 0
-        VENT_DURATION_SEC = 30
-        lid_opened = False
+        # Humidity-based lid control (open/close only when thresholds crossed)
+        HUMIDITY_HIGH_THRESHOLD = 70.0   # percent -> open
+        HUMIDITY_LOW_THRESHOLD = 55.0    # percent -> close
+        servo_angle_this_cycle = None
         for reading in readings:
-            profile = profiles.get(reading.plant_id)
-            if profile and reading.humidity_pct is not None:
-                hum_max = getattr(profile, "humidity_max", 75.0)
-                if reading.humidity_pct > hum_max:
-                    logger.warning(
-                        "💨 High humidity (%.1f%%) for %s – opening lid for %d sec",
-                        reading.humidity_pct, reading.plant_id, VENT_DURATION_SEC
-                    )
-                    actuate_servo_lid(LID_OPEN_ANGLE)
-                    await asyncio.sleep(VENT_DURATION_SEC)
-                    actuate_servo_lid(LID_CLOSED_ANGLE)
-                    lid_opened = True
-                    break
-        if not lid_opened:
-            actuate_servo_lid(LID_CLOSED_ANGLE)
+            if reading.humidity_pct is None:
+                continue
+            if reading.humidity_pct > HUMIDITY_HIGH_THRESHOLD:
+                logger.warning("💨 High humidity (%.1f%%) for %s — opening lid", reading.humidity_pct, reading.plant_id)
+                actuate_servo_lid(90)
+                servo_angle_this_cycle = 90
+                break
+            elif reading.humidity_pct < HUMIDITY_LOW_THRESHOLD:
+                logger.info("Humidity low (%.1f%%) for %s — closing lid", reading.humidity_pct, reading.plant_id)
+                actuate_servo_lid(0)
+                servo_angle_this_cycle = 0
+                break
 
         # Learning
         logger.info("─" * 40)
@@ -172,6 +172,46 @@ async def allocation_cycle() -> None:
         logger.info("=" * 60)
         logger.info("CYCLE COMPLETE  utility=%.4f", decision.total_utility)
         logger.info("=" * 60)
+
+        # Build a structured cycle report and log it
+        try:
+            cycle_data = {
+                "cycle_id": decision.cycle_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "readings": [
+                    {
+                        "plant_id": r.plant_id,
+                        "moisture_pct": r.moisture_pct,
+                        "light_lux": r.light_lux,
+                        "temperature_c": r.temperature_c,
+                        "humidity_pct": r.humidity_pct,
+                    }
+                    for r in readings
+                ],
+                "requests": [
+                    {
+                        "plant_id": req.plant_id,
+                        "urgency": req.urgency,
+                        "utility": req.utility,
+                        "requested_ml": req.requested_amount,
+                    }
+                    for req in all_requests if req.resource.value == "water"
+                ],
+                "allocations": decision.water_allocations,
+                "water_remaining_ml": constraints.water_available_ml,
+                "tank_level_ml": constraints.water_available_ml,
+                "tank_hours_remaining": constraints.predicted_tank_hours,
+                "tank_warning": constraints.tank_critical,
+                "coordinator_notes": decision.coordinator_notes,
+                "total_utility": decision.total_utility,
+                "optimization_latency_ms": opt_latency_ms,
+                "rl_params": {},
+                "action_taken": {pid: f"watered {ml:.1f} ml" for pid, ml in decision.water_allocations.items()},
+                "servo_angle": servo_angle_this_cycle,
+            }
+            log_cycle(cycle_data)
+        except Exception:
+            logger.exception("Failed to write cycle log")
 
     except Exception as exc:
         logger.exception("Allocation cycle failed: %s", exc)
@@ -184,6 +224,11 @@ def start_scheduler() -> None:
         id="allocation_cycle",
         replace_existing=True,
     )
+    # register resource agent with bridge before starting
+    try:
+        set_resource_agent(_resource_agent)
+    except Exception:
+        logger.exception("Failed to set resource agent on bridge")
     scheduler.start()
     logger.info("Scheduler started — interval: %ds", settings.coordinator_interval_seconds)
 
