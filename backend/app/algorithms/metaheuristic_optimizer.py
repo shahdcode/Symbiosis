@@ -18,6 +18,9 @@ def optimize_water_allocations(
     population_size: int = 30,
     generations: int = 50,
     max_per_plant: np.ndarray | None = None,
+    sa_steps: int = 60,
+    sa_t_start: float = 80.0,
+    sa_t_end: float = 0.5,
 ) -> Tuple[np.ndarray, float]:
     """Return (water_allocs, best_fitness).
 
@@ -88,7 +91,8 @@ def optimize_water_allocations(
 
         # SA local refinement on current best — only accept if improved
         sa_candidate, sa_score = _simulated_annealing_local(
-            best, best_score, fitness, water_budget, n_plants, caps=caps
+            best, best_score, fitness, water_budget, n_plants, caps=caps,
+            sa_steps=sa_steps, t_start=sa_t_start, t_end=sa_t_end,
         )
         if sa_score > best_score:
             best = sa_candidate

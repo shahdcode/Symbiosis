@@ -6,7 +6,6 @@ for this allocation cycle. Exposes constraints to the Coordinator.
 """
 from dataclasses import dataclass, field
 
-from ultralytics import settings
 from app.core.logging import get_logger
 import math
 import numpy as np
@@ -176,10 +175,15 @@ class ResourceAgent:
             evap += light_lux / 1_000_000.0  # tiny lux contribution
         f.predict(u={'evap': evap}, dt=1.0 / 12.0)
         f.update(moisture_pct)
-        ttc = f.predict_time_to_critical(critical_moisture=15.0)
+        # Use species-specific critical threshold if registered, else default 30%
+        # (matches Basil m_crit=30, Coleus m_crit=25 from species profiles)
+        _species_crit = {"plant_1": 30.0, "plant_2": 25.0}
+        crit_threshold = _species_crit.get(plant_id, 30.0)
+        ttc = f.predict_time_to_critical(critical_moisture=crit_threshold)
         if ttc < settings.plant_warning_hours:
             logger.warning(
-                "Plant %s predicted to reach critical moisture in %.2f hours", plant_id, ttc
+                "Plant %s predicted to reach critical moisture in %.2f hours (crit=%.0f%%)",
+                plant_id, ttc, crit_threshold,
             )
     # ── Consume resources after allocation ──────────────────────────────────
 

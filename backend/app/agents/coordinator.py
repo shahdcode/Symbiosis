@@ -129,6 +129,9 @@ class CoordinatorAgent:
                     population_size=settings.ga_population_size,
                     generations=settings.ga_generations,
                     max_per_plant=plant_caps,
+                    sa_steps=getattr(settings, "sa_steps", 60),
+                    sa_t_start=getattr(settings, "sa_t_start", 80.0),
+                    sa_t_end=getattr(settings, "sa_t_end", 0.5),
                 )
 
             total_utility = water_utility_fn(w_best)

@@ -26,8 +26,12 @@ class Settings(BaseSettings):
     # Metaheuristic params
     ga_population_size: int = 20
     ga_generations: int = 20
-    ga_early_stop_delta: float = 0.01
+    ga_early_stop_delta: float = 1e-6
     synergy_coefficient: float = 0.001
+    # SA fine-tuning params (passed through to optimizer)
+    sa_steps: int = 60
+    sa_t_start: float = 80.0
+    sa_t_end: float = 0.5
 
     # DRL toggle
     use_drl: bool = False
