@@ -70,7 +70,6 @@ def optimize_water_allocations(
             child[idx] *= (1.0 + random.gauss(0.0, 0.15))
 
             # repair: clip negatives then re-scale to budget
-# repair: clip to [0, cap] then scale down if over budget
             child = np.clip(child, 0.0, caps)
             total = child.sum()
             if total > water_budget and total > 0:
@@ -87,7 +86,6 @@ def optimize_water_allocations(
             if s > best_score:
                 best = ind.copy()
                 best_score = s
-
 
         # SA local refinement on current best — only accept if improved
         sa_candidate, sa_score = _simulated_annealing_local(
@@ -121,12 +119,21 @@ def _simulated_annealing_local(
     sa_steps: int = 40,
     t_start: float = 50.0,
     t_decay: float = 0.92,
+    t_end: float = None,
 ) -> Tuple[np.ndarray, float]:
-    """SA perturbation loop that respects the water budget and per-plant caps."""
+    """SA perturbation loop that respects the water budget and per-plant caps.
+    
+    If t_end is provided, t_decay is automatically calculated from t_start to t_end.
+    """
     if caps is None:
         caps = np.full(n_plants, water_budget)
     ind = individual.copy()
     current_score = score
+    
+    # Calculate decay from t_start to t_end if t_end provided
+    if t_end is not None and t_end > 0 and t_start > t_end and sa_steps > 0:
+        t_decay = (t_end / t_start) ** (1.0 / sa_steps)
+    
     T = t_start
 
     for _ in range(sa_steps):
