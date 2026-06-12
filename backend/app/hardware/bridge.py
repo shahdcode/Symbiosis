@@ -2,6 +2,7 @@
 import logging
 from app.core.config import settings
 from app.models.domain import SensorReading
+from typing import Optional
 from app.core.logging import get_logger
 from app.hardware.serial_bridge import open_serial, SerialBridgeProtocol
 
