@@ -92,19 +92,46 @@ def gaussian_sat(moisture, sp):
 
 
 def build_utility_fn(moistures, species, budget):
-    """Returns a closure over current moisture state for the optimizer."""
+    """Returns a closure over current moisture state for the optimizer.
+    
+    Rewards moving plants toward optimal moisture, but penalizes water waste
+    when tank is low to encourage efficient use.
+    """
     def utility_fn(w):
         total = 0.0
         for i, sp in enumerate(species):
             gain = w[i] * sp["gamma"]
             new_m = min(95.0, moistures[i] + gain)
-            # Just use the after-irrigation satisfaction
-            sat_after = gaussian_sat(new_m, sp)
-            # Add deficit urgency bonus (plants that are drier get higher priority)
-            deficit = max(0.0, sp["optimal"] - moistures[i]) / sp["optimal"]
-            urgency_bonus = 1.0 + deficit * 2.0  # Stronger urgency
-            total += sat_after * urgency_bonus
-        return total / len(species)  # Average across plants
+            # Gaussian satisfaction — peaks at optimal, falls off on both sides
+            sat = gaussian_sat(new_m, sp)
+            
+            # Penalize over-watering (above 110% of optimal)
+            overwater_penalty = max(0.0, new_m - sp["optimal"] * 1.10) * 0.1
+            
+            # Penalize giving water when already above optimal
+            if moistures[i] > sp["optimal"]:
+                waste_penalty = (w[i] / 200.0) * 0.15
+            else:
+                waste_penalty = 0.0
+            
+            # NEW: Penalize using water when tank is critically low
+            tank_pct = budget / 180.0 * 100  # Approximate tank %
+            if tank_pct < 30 and w[i] > 20:
+                low_tank_penalty = 0.2 * (1.0 - tank_pct / 30.0)
+            else:
+                low_tank_penalty = 0.0
+            
+            # Emergency bonus - higher when plant is truly critical
+            if moistures[i] < sp["m_crit"]:
+                emergency_boost = 2.0  # Stronger emergency response
+            elif moistures[i] < sp["optimal"] * 0.6:
+                emergency_boost = 1.3
+            else:
+                emergency_boost = 1.0
+            
+            total += (sat - overwater_penalty - waste_penalty - low_tank_penalty) * emergency_boost
+        
+        return total / len(species)
     return utility_fn
 
 
@@ -115,11 +142,26 @@ DAY_MULTIPLIERS = {
 }
 
 DAY_STARTS = {
-    1:  (62.4, 44.1),  2:  (60.8, 43.6),  3:  (59.3, 43.1),
-    4:  (61.2, 44.8),  5:  (57.9, 42.7),  6:  (56.4, 41.9),
-    7:  (52.1, 42.4),  8:  (58.7, 43.9),  9:  (60.1, 44.3),
-    10: (57.3, 42.8), 11:  (59.8, 43.7), 12:  (61.4, 44.6),
-    13: (60.7, 44.2), 14:  (62.1, 44.9),
+    # Format: (Basil_start, Coleus_start)
+    # Create a mix of healthy, moderate, and stressed conditions
+    
+    # Week 1: Progressive stress then recovery
+    1:  (65.0, 45.0),   # Day 1: Perfect start
+    2:  (58.0, 40.0),   # Day 2: Slightly stressed
+    3:  (48.0, 34.0),   # Day 3: Moderate stress
+    4:  (38.0, 28.0),   # Day 4: High stress (emergency territory)
+    5:  (45.0, 32.0),   # Day 5: Recovering
+    6:  (55.0, 38.0),   # Day 6: Improving
+    7:  (62.0, 43.0),   # Day 7: Almost recovered
+    
+    # Week 2: Different patterns
+    8:  (35.0, 26.0),   # Day 8: Severe emergency start
+    9:  (50.0, 35.0),   # Day 9: Moderate stress
+    10: (60.0, 42.0),   # Day 10: Near healthy
+    11: (42.0, 30.0),   # Day 11: Back to stress
+    12: (52.0, 36.0),   # Day 12: Recovering
+    13: (40.0, 29.0),   # Day 13: Stressed before test
+    14: (48.0, 34.0),   # Day 14: Moderate before test
 }
 
 TANK_CAPACITY = 5000.0
@@ -167,12 +209,21 @@ def simulate_day(day_num, b_start, c_start, tank_ml):
         else:
             budget = 0.0
 
-        # Caps: don't give more than needed to reach optimal
-        caps = np.array([
-            max(0.0, (SPECIES[i]["optimal"] - moistures[i]) / max(SPECIES[i]["gamma"], 1e-6))
-            for i in range(2)
-        ])
-        caps = np.clip(caps, 0.0, 200.0)
+        # Caps: allow some over-allocation occasionally to create diversity
+        # 20% of cycles: use loose caps (GA-SA can choose to over-water slightly)
+        # 80% of cycles: standard caps capped at 1.3× what's needed
+        if random.random() < 0.20:
+            caps = np.full(2, 200.0)
+        else:
+            caps = np.array([
+                max(0.0, (SPECIES[i]["optimal"] - moistures[i]) / max(SPECIES[i]["gamma"], 1e-6)) * 1.3
+                for i in range(2)
+            ])
+            caps = np.clip(caps, 0.0, 200.0)
+        
+        # 10% of cycles: simulate missed watering (budget = 0) for recovery examples
+        if random.random() < 0.10:
+            budget = 0.0
 
         # ── ACTUAL GA-SA CALL ────────────────────────────────────────
         allocs = np.zeros(2)

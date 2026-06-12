@@ -36,7 +36,7 @@ RESULTS.mkdir(parents=True, exist_ok=True)
 
 STATE_DIM = 8
 ACTION_DIM = 2
-HIDDEN = [256, 256]
+HIDDEN = [128, 128]
 TANK_CAP = 5000.0
 
 SPECIES = [
@@ -81,8 +81,9 @@ class A2CPolicy(nn.Module):
         prev = state_dim
         for h in hidden:
             layers.append(nn.Linear(prev, h))
+            layers.append(nn.LayerNorm(h))
             layers.append(nn.ReLU())
-            layers.append(nn.Dropout(0.2))
+            layers.append(nn.Dropout(0.3))
             prev = h
         layers.append(nn.Linear(prev, action_dim))
         layers.append(nn.Sigmoid())

@@ -25,10 +25,12 @@ LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 STATE_DIM = 8
 ACTION_DIM = 2
-HIDDEN = [256, 256]
-LR = 1e-3
-BATCH_SIZE = 64
-EPOCHS = 100
+HIDDEN = [128, 128]
+LR = 3e-4
+BATCH_SIZE = 32
+EPOCHS = 200
+EARLY_STOP_PATIENCE = 20
+L2_WEIGHT_DECAY = 1e-4
 
 STATE_COLS = [
     'plant_1_moisture_ekf', 'plant_2_moisture_ekf',
@@ -43,22 +45,33 @@ ACTION_COLS = ['plant_1_alloc_ml', 'plant_2_alloc_ml']
 # ============================================
 
 class BCDataset(Dataset):
-    def __init__(self, df):
-        # Normalize features
-        self.states = df[STATE_COLS].values.astype(np.float32)
-        # Normalize actions to [0, 1] range
+    def __init__(self, df, state_mean=None, state_std=None, augment=False):
+        self.augment = augment
+        self.states_raw = df[STATE_COLS].values.astype(np.float32)
         self.actions = df[ACTION_COLS].values.astype(np.float32) / 200.0
-        
-        # Normalize state features
-        self.state_mean = self.states.mean(axis=0)
-        self.state_std = self.states.std(axis=0) + 1e-8
-        self.states = (self.states - self.state_mean) / self.state_std
-        
+
+        # Fit normalization on this split (or use provided stats for val)
+        if state_mean is None:
+            self.state_mean = self.states_raw.mean(axis=0)
+            self.state_std = self.states_raw.std(axis=0) + 1e-8
+        else:
+            self.state_mean = state_mean
+            self.state_std = state_std
+
+        self.states = (self.states_raw - self.state_mean) / self.state_std
+
     def __len__(self):
         return len(self.states)
-    
+
     def __getitem__(self, idx):
-        return torch.tensor(self.states[idx]), torch.tensor(self.actions[idx])
+        state = self.states[idx].copy()
+        action = self.actions[idx].copy()
+        if self.augment:
+            # Add small Gaussian noise to states (data augmentation)
+            state += np.random.normal(0, 0.03, state.shape).astype(np.float32)
+            # Small noise on actions too
+            action = np.clip(action + np.random.normal(0, 0.01, action.shape), 0, 1).astype(np.float32)
+        return torch.tensor(state), torch.tensor(action)
 
 
 class A2CPolicy(nn.Module):
@@ -68,12 +81,13 @@ class A2CPolicy(nn.Module):
         prev = state_dim
         for h in hidden:
             layers.append(nn.Linear(prev, h))
+            layers.append(nn.LayerNorm(h))   # LayerNorm instead of just Dropout
             layers.append(nn.ReLU())
-            layers.append(nn.Dropout(0.2))
+            layers.append(nn.Dropout(0.3))   # Increased dropout
             prev = h
         layers.append(nn.Linear(prev, action_dim))
-        layers.append(nn.Sigmoid())  # Output in [0, 1]
-        
+        layers.append(nn.Sigmoid())
+
         self.net = nn.Sequential(*layers)
     
     def forward(self, x):
@@ -104,15 +118,20 @@ def train_behavior_cloning(df):
     train_df = df[df['day'] <= 10].copy()
     val_df = df[(df['day'] == 11) | (df['day'] == 12)].copy()
     
-    train_dataset = BCDataset(train_df)
-    val_dataset = BCDataset(val_df)
+    train_dataset = BCDataset(train_df, augment=True)
+    # Val uses train's normalization stats — no augmentation
+    val_dataset = BCDataset(val_df,
+                            state_mean=train_dataset.state_mean,
+                            state_std=train_dataset.state_std,
+                            augment=False)
     
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
     
     model = A2CPolicy()
-    optimizer = optim.Adam(model.parameters(), lr=LR)
+    optimizer = optim.Adam(model.parameters(), lr=LR, weight_decay=L2_WEIGHT_DECAY)
     criterion = nn.MSELoss()
+    early_stop_counter = 0
     
     print("\n" + "=" * 60)
     print("STEP 1: Behavior Cloning (Supervised Learning)")
@@ -121,8 +140,9 @@ def train_behavior_cloning(df):
     print(f"Val samples: {len(val_dataset)}")
     
     best_val_loss = float('inf')
+    early_stop_counter = 0
     log_rows = []
-    
+
     for epoch in range(1, EPOCHS + 1):
         # Training
         model.train()
@@ -132,9 +152,10 @@ def train_behavior_cloning(df):
             preds = model(states)
             loss = criterion(preds, actions)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             train_loss += loss.item()
-        
+
         # Validation
         model.eval()
         val_loss = 0
@@ -142,22 +163,23 @@ def train_behavior_cloning(df):
             for states, actions in val_loader:
                 preds = model(states)
                 val_loss += criterion(preds, actions).item()
-        
+
         train_loss /= len(train_loader)
         val_loss /= len(val_loader)
-        
+
         log_rows.append({
             'epoch': epoch,
             'train_loss': round(train_loss, 6),
             'val_loss': round(val_loss, 6)
         })
-        
+
         if epoch % 10 == 0 or epoch == 1:
             print(f"  Epoch {epoch:3d}: train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
-        
-        # Save best model
+
+        # Save best model + early stopping
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            early_stop_counter = 0
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -165,6 +187,11 @@ def train_behavior_cloning(df):
                 'state_mean': train_dataset.state_mean,
                 'state_std': train_dataset.state_std
             }, MODEL_DIR / 'a2c_bc_best.pt')
+        else:
+            early_stop_counter += 1
+            if early_stop_counter >= EARLY_STOP_PATIENCE:
+                print(f"\n  Early stopping at epoch {epoch} (no improvement for {EARLY_STOP_PATIENCE} epochs)")
+                break
     
     # Save training log
     with open(LOG_PATH, 'w', newline='') as f:
