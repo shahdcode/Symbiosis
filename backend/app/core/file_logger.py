@@ -62,6 +62,29 @@ CSV data file   : {_csv_path.name}
     logging.getLogger("app").info("File logging initialised → %s", _LOG_DIR)
 
 
+def log_sensor_csv(readings: list[dict[str, Any] | object]) -> None:
+    """Log raw sensor readings to the active CSV session file."""
+    if _csv_writer is None or _csv_file is None:
+        return
+
+    for reading in readings:
+        if hasattr(reading, "model_dump"):
+            reading_data = reading.model_dump()
+        else:
+            reading_data = dict(reading)
+
+        row = {
+            "timestamp": reading_data.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+            "plant_id": reading_data.get("plant_id"),
+            "moisture_pct": reading_data.get("moisture_pct"),
+            "light_lux": reading_data.get("light_lux"),
+            "temperature_c": reading_data.get("temperature_c"),
+            "humidity_pct": reading_data.get("humidity_pct"),
+        }
+        _csv_writer.writerow(row)
+    _csv_file.flush()
+
+
 def log_cycle(cycle_data: dict[str, Any]) -> None:
     """
     Call once per allocation cycle with a dict containing all cycle info.

@@ -1,5 +1,8 @@
 """Hardware bridge using simple serial reader"""
 import logging
+from typing import Optional
+
+import simple_serial
 from app.core.config import settings
 from app.models.domain import SensorReading
 from app.core.logging import get_logger
@@ -13,6 +16,7 @@ _latest_readings: dict[str, SensorReading] = {}
 # Serial protocol instance
 _serial_protocol: Optional[SerialBridgeProtocol] = None
 _serial_transport = None
+_serial_started = False
 
 # Reference to the ResourceAgent — set by scheduler on startup
 _resource_agent = None
