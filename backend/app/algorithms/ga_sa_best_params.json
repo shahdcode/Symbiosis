@@ -1,0 +1,1 @@
+﻿{"population_size": 50, "generations": 30, "sa_steps": 80, "sa_t_start": 100.0, "sa_t_end": 0.5, "avg_fitness": 0.7294, "avg_latency_ms": 27.4}
