@@ -1,145 +1,226 @@
-"""Hardware bridge using simple serial reader"""
+"""Hardware bridge for Symbiosis.
+backend/app/hardware/bridge.py
+
+Owns the serial connection to the ESP32 via SerialBridgeProtocol (async,
+JSON-lines). All commands go through send_command() on the protocol so
+the same connection handles both RX (sensor data) and TX (actuation).
+
+Key points:
+- simple_serial is NOT used here — that was a test module.
+- set_resource_agent() must be called before start_bridge() so tank
+  level updates from the ultrasonic sensor reach the ResourceAgent.
+- actuate_servo_lid() must ONLY be called when the scheduler has
+  determined the lid should actually move. Do not call it every cycle.
+"""
+
+import json
 import logging
 from typing import Optional
 
-import simple_serial
 from app.core.config import settings
 from app.models.domain import SensorReading
-from typing import Optional
 from app.core.logging import get_logger
 from app.hardware.serial_bridge import open_serial, SerialBridgeProtocol
 
 logger = get_logger(__name__)
 
-# Holds latest sensor messages keyed by plant_id
+# ── State ─────────────────────────────────────────────────────────────────────
 _latest_readings: dict[str, SensorReading] = {}
-
-# Serial protocol instance
 _serial_protocol: Optional[SerialBridgeProtocol] = None
 _serial_transport = None
-_serial_started = False
-
-# Reference to the ResourceAgent — set by scheduler on startup
 _resource_agent = None
 
+# ── Tank geometry — adjust to your physical reservoir ────────────────────────
+# Ultrasonic sensor returns distance-to-water-surface in cm.
+# depth_cm = MAX_HEIGHT - sensor_reading  →  level_ml = depth_cm × BASE_AREA
+_TANK_MAX_HEIGHT_CM: float = 20.0
+_TANK_BASE_AREA_CM2: float = 314.0   # π × r² for a 10 cm radius cylinder
+
+
 def set_resource_agent(agent) -> None:
+    """Inject the ResourceAgent so tank level is updated from sensor data."""
     global _resource_agent
     _resource_agent = agent
 
 
-def _on_serial_message(msg: dict):
-    """Callback for incoming parsed JSON messages from Arduino."""
+# ── Serial message handler ────────────────────────────────────────────────────
+
+def _on_serial_message(msg: dict) -> None:
+    """Called for every valid JSON line received from the Arduino."""
     try:
-        # ── Hardware event confirmations ──────────────────────────────
-        if msg.get("event") in ("water_delivered", "lid_moved", "lid_auto_closed"):
+        event = msg.get("event")
+
+        # Hardware confirmation — log and done
+        if event in ("water_delivered", "lid_moved", "lid_auto_closed", "boot"):
             logger.info("Hardware event: %s", msg)
             return
 
-        # ── Sensor readings ───────────────────────────────────────────
-        if 'plant_id' in msg:
-            tank_raw = msg.get('tank_level')
-            # Update tank level from ultrasonic sensor if available
-            # tank_raw is distance in cm; convert to ml using tank geometry
-            # Assumes cylindrical tank: 20 cm diameter → ~314 cm² cross-section
-            # Adjust TANK_CROSS_SECTION_CM2 and TANK_MAX_HEIGHT_CM for your tank
-            if tank_raw is not None and tank_raw > 0 and _resource_agent is not None:
-                TANK_MAX_HEIGHT_CM = 20.0
-                TANK_CROSS_SECTION_CM2 = 314.0   # π * r² for r=10 cm
-                depth_cm = max(0.0, TANK_MAX_HEIGHT_CM - float(tank_raw))
-                level_ml = depth_cm * TANK_CROSS_SECTION_CM2
-                try:
-                    _resource_agent.update_tank_level(level_ml)
-                except Exception:
-                    logger.exception("Failed to update resource agent tank level")
+        # Sensor reading
+        if "plant_id" not in msg:
+            logger.debug("Unrecognised message from Arduino: %s", msg)
+            return
 
-            sr = SensorReading(
-                plant_id=msg.get('plant_id'),
-                moisture_pct=float(msg.get('moisture', 0.0)),
-                light_lux=float(msg.get('light', 0.0)),
-                temperature_c=float(msg.get('temperature')) if msg.get('temperature') is not None else None,
-                humidity_pct=float(msg.get('humidity')) if msg.get('humidity') is not None else None,
-                sensor_ok=True,
-            )
-            _latest_readings[sr.plant_id] = sr
-            logger.debug("Received sensor reading for %s: moisture=%.1f%%", sr.plant_id, sr.moisture_pct)
-    except Exception as e:
-        logger.exception("Failed to handle serial message: %s", e)
+        pid = str(msg["plant_id"])
+
+        # Update tank level from ultrasonic (every reading carries it)
+        tank_raw = msg.get("tank_level")
+        if tank_raw is not None and float(tank_raw) >= 0 and _resource_agent is not None:
+            depth_cm = max(0.0, _TANK_MAX_HEIGHT_CM - float(tank_raw))
+            level_ml = depth_cm * _TANK_BASE_AREA_CM2
+            try:
+                _resource_agent.update_tank_level(level_ml)
+            except Exception:
+                logger.exception("Failed to update tank level on ResourceAgent")
+
+        # Safe float conversion — handles NaN from DHT failures
+        def _f(val, fallback=None):
+            try:
+                v = float(val)
+                return None if v != v else v   # NaN → None
+            except (TypeError, ValueError):
+                return fallback
+
+        sr = SensorReading(
+            plant_id=pid,
+            moisture_pct=_f(msg.get("moisture"), 0.0),
+            light_lux=_f(msg.get("light"), 0.0),
+            temperature_c=_f(msg.get("temperature")),
+            humidity_pct=_f(msg.get("humidity")),
+            sensor_ok=True,
+        )
+        _latest_readings[pid] = sr
+        logger.debug(
+            "Sensor — %s: moisture=%.1f%%  temp=%s°C  humidity=%s%%  light=%.0f lux",
+            pid,
+            sr.moisture_pct,
+            f"{sr.temperature_c:.1f}" if sr.temperature_c is not None else "N/A",
+            f"{sr.humidity_pct:.1f}" if sr.humidity_pct is not None else "N/A",
+            sr.light_lux,
+        )
+
+    except Exception:
+        logger.exception("Error processing serial message: %s", msg)
 
 
-async def start_bridge():
-    global _serial_started
+# ── Bridge lifecycle ──────────────────────────────────────────────────────────
+
+async def start_bridge() -> None:
+    """Open the serial connection to the Arduino. Call once at startup."""
+    global _serial_protocol, _serial_transport
     if not settings.arduino_port:
-        logger.info("No ARDUINO_PORT configured — using simulated bridge")
+        logger.info("No ARDUINO_PORT set — serial bridge inactive (simulation mode)")
         return
-    
-    if simple_serial.start_serial_reader(settings.arduino_port, settings.arduino_baud_rate):
-        _serial_started = True
-        logger.info(f"Serial bridge started on {settings.arduino_port}@{settings.arduino_baud_rate}")
-    else:
-        logger.error(f"Failed to start serial bridge on {settings.arduino_port}")
+    try:
+        _serial_transport, _serial_protocol = await open_serial(
+            settings.arduino_port,
+            settings.arduino_baud_rate,
+            _on_serial_message,
+        )
+        logger.info(
+            "Serial bridge started on %s @ %d baud",
+            settings.arduino_port, settings.arduino_baud_rate,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to open serial port %s — check cable and port name",
+            settings.arduino_port,
+        )
 
-async def stop_bridge():
-    simple_serial.stop_serial_reader()
+
+async def stop_bridge() -> None:
+    global _serial_transport, _serial_protocol
+    if _serial_transport:
+        _serial_transport.close()
+        _serial_transport = None
+    _serial_protocol = None
     logger.info("Serial bridge stopped")
 
-def read_sensors() -> list[SensorReading]:
-    """Return the latest sensor readings from the ESP32"""
-    if not _serial_started:
-        # Fallback to simulation if configured
-        if settings.simulate_sensors:
-            return _simulate_sensors()
-        return []
-    
-    return simple_serial.get_sensor_readings()
 
-def _simulate_sensors() -> list[SensorReading]:
-    """Simulate sensor readings for testing"""
-    import random
-    readings = []
-    for pid in ["plant_1", "plant_2"]:
-        readings.append(SensorReading(
+# ── Sensor reads ──────────────────────────────────────────────────────────────
+
+import random as _random
+_sim_moisture: dict[str, float] = {}
+
+
+def read_sensors() -> list[SensorReading]:
+    """Return the most recent sensor readings.
+
+    Uses real Arduino data if the bridge is connected.
+    Falls back to simulation only when SIMULATE_SENSORS=true and no real
+    data has arrived yet.
+    """
+    if _latest_readings:
+        return list(_latest_readings.values())
+
+    if not settings.simulate_sensors:
+        return []
+
+    # Simulation path
+    for pid in ("plant_1", "plant_2"):
+        if pid not in _sim_moisture:
+            _sim_moisture[pid] = _random.uniform(35.0, 70.0)
+        else:
+            _sim_moisture[pid] = max(5.0, _sim_moisture[pid] - _random.uniform(0.5, 2.0))
+
+    return [
+        SensorReading(
             plant_id=pid,
-            moisture_pct=round(random.uniform(30, 70), 1),
-            light_lux=round(random.uniform(1000, 8000), 1),
-            temperature_c=round(random.uniform(20, 30), 1),
-            humidity_pct=round(random.uniform(40, 80), 1),
+            moisture_pct=round(_sim_moisture[pid], 1),
+            light_lux=round(_random.uniform(800.0, 8000.0), 1),
+            temperature_c=round(_random.uniform(18.0, 32.0), 1),
+            humidity_pct=round(_random.uniform(40.0, 80.0), 1),
             sensor_ok=True,
-        ))
-    return readings
+        )
+        for pid in ("plant_1", "plant_2")
+    ]
+
+
+# ── Serial command sender ─────────────────────────────────────────────────────
+
+def _send_command(cmd: dict) -> bool:
+    """Send a JSON command to the Arduino through the shared serial protocol."""
+    if _serial_protocol is None:
+        if settings.arduino_port:
+            logger.warning("Serial not connected — command NOT sent: %s", cmd)
+        else:
+            logger.debug("No serial port configured — ignoring command: %s", cmd)
+        return False
+    try:
+        _serial_protocol.send_command(cmd)
+        return True
+    except Exception:
+        logger.exception("Failed to send command: %s", cmd)
+        return False
+
+
+# ── Actuation functions ───────────────────────────────────────────────────────
 
 def actuate_water(plant_id: str, ml: float) -> bool:
-    """Send water command to ESP32"""
-    if not _serial_started:
-        logger.warning(f"Cannot send water command: serial not connected")
-        return False
-    
-    cmd = {"water": {"plant": plant_id, "ml": float(ml)}}
-    try:
-        import json
-        simple_serial._serial_connection.write((json.dumps(cmd) + "\n").encode())
-        logger.info(f"Commanded water → {plant_id}: {ml} ml")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to send water command: {e}")
-        return False
+    """Trigger pump + correct valve for `ml` ml to `plant_id`."""
+    ok = _send_command({"water": {"plant": plant_id, "ml": float(ml)}})
+    if ok:
+        logger.info("Commanded water → %s: %.1f ml", plant_id, ml)
+        # Keep simulated moisture consistent
+        if plant_id in _sim_moisture:
+            _sim_moisture[plant_id] = min(100.0, _sim_moisture[plant_id] + ml * 0.02)
+    return ok
+
 
 def actuate_servo_lid(angle: int) -> bool:
-    """Send servo command to ESP32"""
-    if not _serial_started:
-        logger.warning(f"Cannot send servo command: serial not connected")
-        return False
-    
-    cmd = {"servo_lid": {"angle": int(angle)}}
-    try:
-        import json
-        simple_serial._serial_connection.write((json.dumps(cmd) + "\n").encode())
-        logger.info(f"Commanded servo_lid → angle={angle}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to send servo command: {e}")
-        return False
+    """
+    Rotate the servo lid to `angle` degrees.
+
+    ONLY call this when the scheduler humidity check has decided the lid
+    should move.  Do NOT call with angle=0 every cycle — that causes
+    continuous servo movement.
+    """
+    ok = _send_command({"servo_lid": {"angle": int(angle)}})
+    if ok:
+        logger.info("Commanded servo_lid → angle=%d", angle)
+    return ok
+
 
 def actuate_light(plant_id: str, duration_minutes: float) -> bool:
-    """Light command (informational only)"""
-    logger.info(f"Light command ignored: {plant_id} for {duration_minutes} min")
+    """Grow-light command (informational only — no dedicated hardware)."""
+    logger.info("Light informational → %s: %.1f min (no hardware)", plant_id, duration_minutes)
     return True
