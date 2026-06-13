@@ -180,16 +180,67 @@ void loop() {
         if (isnan(temp)) temp = -1.0f;
         if (isnan(hum))  hum  = -1.0f;
 
-        postAndActuate("plant_1", soil1, lux, temp, hum, tank);
-        delay(200);
-        postAndActuate("plant_2", soil2, lux, temp, hum, tank);
+        // Build a single JSON object containing both plants
+        StaticJsonDocument<512> doc;
+        JsonArray readings = doc.createNestedArray("readings");
+
+        JsonObject p1 = readings.createNestedObject();
+        p1["plant_id"] = "plant_1";
+        p1["moisture"] = soil1;
+        p1["light"]    = lux;
+        p1["temperature"] = temp;
+        p1["humidity"]    = hum;
+        p1["tank_level"]  = tank;
+
+        JsonObject p2 = readings.createNestedObject();
+        p2["plant_id"] = "plant_2";
+        p2["moisture"] = soil2;
+        p2["light"]    = lux;
+        p2["temperature"] = temp;
+        p2["humidity"]    = hum;
+        p2["tank_level"]  = tank;
+
+        String body;
+        serializeJson(doc, body);
+
+        // Send one POST for the whole batch
+        HTTPClient http;
+        http.begin(BACKEND_URL);
+        http.addHeader("Content-Type", "application/json");
+        int code = http.POST(body);
+
+        if (code == 200) {
+            String resp = http.getString();
+            Serial.printf("[RESP] %s\n", resp.c_str());
+
+            StaticJsonDocument<512> respDoc;
+            DeserializationError err = deserializeJson(respDoc, resp);
+            if (!err) {
+                JsonObject cmds = respDoc["commands"].as<JsonObject>();
+                if (cmds.containsKey("water")) {
+                    JsonArray waterList = cmds["water"].as<JsonArray>();
+                    for (JsonObject w : waterList) {
+                        const char* target = w["plant"];
+                        float ml = w["ml"];
+                        actuateWater(target, ml);
+                    }
+                }
+                if (cmds.containsKey("servo_lid")) {
+                    int angle = cmds["servo_lid"]["angle"];
+                    actuateLid(angle);
+                }
+            }
+        } else {
+            Serial.printf("[POST] Failed — HTTP %d\n", code);
+        }
+        http.end();
     }
 
+    // Lid auto-close (still works)
     if (lidIsOpen && (now - lidOpenedAt >= LID_OPEN_MS)) {
         lidServo.write(0);
         lidIsOpen = false;
         Serial.println("[ACT] Lid auto-closed");
     }
-
     delay(10);
 }

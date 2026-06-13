@@ -15,6 +15,7 @@ Key points:
 
 import json
 import logging
+import time
 from typing import Optional
 
 from app.core.config import settings
@@ -29,6 +30,7 @@ _latest_readings: dict[str, SensorReading] = {}
 _serial_protocol: Optional[SerialBridgeProtocol] = None
 _serial_transport = None
 _resource_agent = None
+_last_lid_open: float = 0.0
 
 # ── Tank geometry — adjust to your physical reservoir ────────────────────────
 # Ultrasonic sensor returns distance-to-water-surface in cm.
@@ -151,17 +153,10 @@ async def ingest_sensor_post(data: dict) -> dict:
         sr.light_lux,
     )
 
-    if len(_latest_readings) < 2:
-        logger.debug("Waiting for all plant readings before allocating (%d/2)", len(_latest_readings))
-        return {}
-
-    from app.core.scheduler import run_allocation_and_get_commands
-    try:
-        commands = await run_allocation_and_get_commands()
-        return commands
-    except Exception:
-        logger.exception("Allocation cycle failed during HTTP ingestion")
-        return {}
+    # Do not run allocation here; HTTP endpoint will trigger a single
+    # allocation after all readings are ingested. This prevents double
+    # allocation when the ESP32 posts multiple readings per cycle.
+    return {}
 
 
 def _f_safe(val, fallback=None):
@@ -282,6 +277,14 @@ def actuate_servo_lid(angle: int) -> bool:
     should move.  Do NOT call with angle=0 every cycle — that causes
     continuous servo movement.
     """
+    global _last_lid_open
+    now = time.time()
+    # Cooldown: skip repeated open commands within 5 minutes
+    if angle > 0 and (now - _last_lid_open) < 300:
+        logger.info("Servo lid cooldown active — skipping angle=%d", angle)
+        return False
+    if angle > 0:
+        _last_lid_open = now
     ok = _send_command({"servo_lid": {"angle": int(angle)}})
     if ok:
         logger.info("Commanded servo_lid → angle=%d", angle)

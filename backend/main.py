@@ -31,9 +31,18 @@ async def receive_sensor_data(request: Request):
     logger.info("Sensor POST received: %s", data)
 
     from app.hardware.bridge import ingest_sensor_post
-    commands = await ingest_sensor_post(data)
+    # Support batch POSTs with a top-level "readings" array
+    readings = data.get("readings") if isinstance(data, dict) else None
+    if readings and isinstance(readings, list):
+        for r in readings:
+            await ingest_sensor_post(r)
+        from app.core.scheduler import run_allocation_cycle_http
+        commands = await run_allocation_cycle_http()
+        return {"status": "ok", "commands": commands}
 
-    return {"status": "ok", "commands": commands}
+    # Single-reading POST — just ingest and return no commands immediately
+    await ingest_sensor_post(data)
+    return {"status": "ok", "commands": {}}
 
 
 class LogMiddleware(BaseHTTPMiddleware):
