@@ -6,8 +6,11 @@ Light is informational only and is NOT allocated here.
 Citation: Combinatorial auction + metaheuristic (Parkes & Ungar, 2000).
 """
 from typing import Callable, Tuple
+import json
 import random
 import math
+from pathlib import Path
+
 import numpy as np
 
 
@@ -18,6 +21,9 @@ def optimize_water_allocations(
     population_size: int = 30,
     generations: int = 50,
     max_per_plant: np.ndarray | None = None,
+    sa_steps: int = 40,
+    sa_t_start: float = 50.0,
+    sa_t_end: float = 0.5,
 ) -> Tuple[np.ndarray, float]:
     """Return (water_allocs, best_fitness).
 
@@ -88,7 +94,15 @@ def optimize_water_allocations(
 
         # SA local refinement on current best — only accept if improved
         sa_candidate, sa_score = _simulated_annealing_local(
-            best, best_score, fitness, water_budget, n_plants, caps=caps
+            best,
+            best_score,
+            fitness,
+            water_budget,
+            n_plants,
+            caps=caps,
+            sa_steps=sa_steps,
+            t_start=sa_t_start,
+            t_decay=(sa_t_end / max(sa_t_start, 1e-6)) ** (1.0 / max(sa_steps, 1)),
         )
         if sa_score > best_score:
             best = sa_candidate
@@ -105,6 +119,28 @@ def optimize_water_allocations(
             break
 
     return best, best_score
+
+
+def load_best_params() -> dict:
+    """Load optional GA/SA best-parameter snapshot.
+
+    The coordinator uses this as a compatibility shim for previously
+    saved sweep results. If no file is present, it safely falls back to
+    the default settings in the coordinator.
+    """
+    candidates = [
+        Path(__file__).with_name("best_ga_sa_params.json"),
+        Path(__file__).resolve().parent.parent / "data" / "best_ga_sa_params.json",
+    ]
+
+    for path in candidates:
+        try:
+            if path.exists():
+                return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+    return {}
 
 
 def _simulated_annealing_local(

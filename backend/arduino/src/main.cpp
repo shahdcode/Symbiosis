@@ -11,9 +11,9 @@
 #include <HTTPClient.h>
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const char* WIFI_SSID     = "YOUR_SSID";
-const char* WIFI_PASSWORD = "YOUR_PASSWORD";
-const char* BACKEND_URL   = "http://YOUR_PC_IP:8000/sensors/reading";
+const char* WIFI_SSID     = "dodo1962";
+const char* WIFI_PASSWORD = "wsa801962";
+const char* BACKEND_URL = "http://192.168.1.2:8000/sensors/reading";
 
 // ── Pins ──────────────────────────────────────────────────────────────────────
 #define SOIL1_PIN      34
