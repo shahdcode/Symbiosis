@@ -24,8 +24,11 @@ from app.models.domain import (
 from app.agents.resource_agent import ResourceConstraints
 from app.core.logging import get_logger
 from app.db import repository
-from app.algorithms.metaheuristic_optimizer import optimize_water_allocations
+from app.algorithms.metaheuristic_optimizer import optimize_water_allocations, load_best_params
 from app.core.config import settings
+
+# Load the best GA-SA params found by the sweep (falls back to defaults if not run yet)
+_GA_BEST = load_best_params()
 # from backend.app.api.routes import plants
 
 logger = get_logger(__name__)
@@ -103,12 +106,6 @@ class CoordinatorAgent:
                     total += uw
                 return total
 
-            # Prepare defaults so downstream code can always iterate
-            plants: list[str] = []
-            w_best = np.zeros(0)
-            req_map: dict = {}
-            n = 0
-
             # DRL fast-path (optional, falls back to metaheuristic)
             if settings.use_drl:
                 w_best = _try_drl_water(plants, constraints, n)
@@ -122,13 +119,26 @@ class CoordinatorAgent:
                     )
             else:
                 plant_caps = np.array([req_map[i].requested_amount for i in range(n)], dtype=float)
+                # Use swept best params if available, otherwise fall back to .env settings
+                pop = _GA_BEST.get("population_size", settings.ga_population_size)
+                gen = _GA_BEST.get("generations", settings.ga_generations)
+                sa_s = _GA_BEST.get("sa_steps", getattr(settings, "sa_steps", 60))
+                sa_t0 = _GA_BEST.get("sa_t_start", getattr(settings, "sa_t_start", 80.0))
+                sa_t1 = _GA_BEST.get("sa_t_end", getattr(settings, "sa_t_end", 0.5))
+                logger.debug(
+                    "[Coordinator] GA-SA params: pop=%d gen=%d sa_steps=%d t_start=%.1f",
+                    pop, gen, sa_s, sa_t0,
+                )
                 w_best, _ = optimize_water_allocations(
                     n_plants=n,
                     water_budget=remaining_water,
                     utility_fn=water_utility_fn,
-                    population_size=settings.ga_population_size,
-                    generations=settings.ga_generations,
+                    population_size=pop,
+                    generations=gen,
                     max_per_plant=plant_caps,
+                    sa_steps=sa_s,
+                    sa_t_start=sa_t0,
+                    sa_t_end=sa_t1,
                 )
 
             total_utility = water_utility_fn(w_best)
