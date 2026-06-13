@@ -5,6 +5,7 @@ import '../theme/app_theme.dart';
 import '../widgets/bottom_nav.dart';
 import '../widgets/plant_card.dart';
 import '../widgets/shared_widgets.dart';
+import '../widgets/plant_painter.dart'; // for PlantWidget
 import 'dashboard_screen.dart';
 import 'plant_detail_screen.dart';
 import 'scan_screen.dart';
@@ -24,10 +25,52 @@ class _HomeScreenState extends State<HomeScreen> {
   final BackendApi _api = BackendApi();
   Future<List<PlantModel>>? _homePlantsFuture;
 
+  // Placeholder for lid status (real value should come from backend)
+  String _lidStatus = 'Closed'; // 'Open' or 'Closed'
+
   @override
   void initState() {
     super.initState();
     _homePlantsFuture = _loadHomePlants();
+    _fetchLidStatus();
+  }
+
+  Future<void> _fetchLidStatus() async {
+    // TODO: replace with actual API call that returns current lid state
+    // Example: final status = await _api.getLidStatus();
+    // setState(() => _lidStatus = status);
+  }
+
+  Future<void> _toggleLid() async {
+    // TODO: replace with actual API call to toggle the lid
+    // Example: await _api.toggleLid();
+    setState(() {
+      _lidStatus = _lidStatus == 'Closed' ? 'Open' : 'Closed';
+    });
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Lid ${_lidStatus == 'Open' ? 'opened' : 'closed'}'),
+          duration: const Duration(seconds: 1),
+        ),
+      );
+    }
+  }
+
+  // Unified watering method: plantId == null means water all plants
+  Future<void> _waterPlant({String? plantId}) async {
+    // TODO: replace with actual API call
+    // if (plantId == null) await _api.waterAll();
+    // else await _api.waterPlant(plantId);
+    final message = plantId == null ? 'All plants' : 'Plant $plantId';
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Watering $message…'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   Future<List<PlantModel>> get _plantsFuture =>
@@ -150,6 +193,7 @@ class _HomeScreenState extends State<HomeScreen> {
             return _HomeBody(
               showNotification: _showNotification,
               plants: plants,
+              lidStatus: _lidStatus,
               onDismissNotification:
                   () => setState(() => _showNotification = false),
               onNavigateDashboard: () => setState(() => _navIndex = 1),
@@ -199,6 +243,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 );
                 await _refreshHomePlants();
               },
+              onWaterPlant: _waterPlant,
+              onToggleLid: _toggleLid,
             );
           },
         );
@@ -226,20 +272,26 @@ class _HomeScreenState extends State<HomeScreen> {
 class _HomeBody extends StatelessWidget {
   final bool showNotification;
   final List<PlantModel> plants;
+  final String lidStatus;
   final VoidCallback onDismissNotification;
   final VoidCallback onNavigateDashboard;
   final Function(PlantModel) onNavigatePlant;
   final VoidCallback onNavigateScan;
   final VoidCallback onNavigateAdd;
+  final Future<void> Function({String? plantId}) onWaterPlant;
+  final VoidCallback onToggleLid;
 
   const _HomeBody({
     required this.showNotification,
     required this.plants,
+    required this.lidStatus,
     required this.onDismissNotification,
     required this.onNavigateDashboard,
     required this.onNavigatePlant,
     required this.onNavigateScan,
     required this.onNavigateAdd,
+    required this.onWaterPlant,
+    required this.onToggleLid,
   });
 
   int get _attentionCount =>
@@ -260,6 +312,69 @@ class _HomeBody extends StatelessWidget {
     final sorted = [...plants]
       ..sort((a, b) => a.nextWateringMinutes.compareTo(b.nextWateringMinutes));
     return sorted.first;
+  }
+
+  void _showWaterOptions(BuildContext context) {
+    if (plants.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No plants to water.')),
+      );
+      return;
+    }
+
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                  'Water Plant',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+              ),
+              const Divider(),
+              ListTile(
+                leading: const Icon(Icons.water_drop_outlined, color: Color(0xFF0369A1)),
+                title: const Text('All Plants'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  onWaterPlant(plantId: null);
+                },
+              ),
+              ...plants.map((plant) => ListTile(
+                leading: Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: plant.lightColor,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: PlantWidget(
+                    type: plant.svgType,
+                    color: plant.color,
+                    size: 24,
+                    animate: false,
+                  ),
+                ),
+                title: Text(plant.name),
+                subtitle: Text(plant.species),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  onWaterPlant(plantId: plant.id.toString());
+                },
+              )),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -296,7 +411,7 @@ class _HomeBody extends StatelessWidget {
               ),
             ),
           ),
-          SliverToBoxAdapter(child: _buildQuickActions()),
+          SliverToBoxAdapter(child: _buildQuickActions(context)),
           const SliverToBoxAdapter(child: SizedBox(height: 20)),
         ],
       ),
@@ -578,7 +693,7 @@ class _HomeBody extends StatelessWidget {
               physics: const NeverScrollableScrollPhysics(),
               mainAxisSpacing: 10,
               crossAxisSpacing: 10,
-              childAspectRatio: 2.8,
+              childAspectRatio: 2.5,
               children: [
                 DarkStatCard(
                   label: 'Water Tank',
@@ -587,12 +702,9 @@ class _HomeBody extends StatelessWidget {
                   iconColor: Color(0xFF60A5FA),
                 ),
                 DarkStatCard(
-                  label: 'LED Light',
-                  value:
-                      plants.isNotEmpty
-                          ? 'Pos. ${plants.first.name.substring(0, 1)}'
-                          : 'Pos. A',
-                  icon: Icons.wb_sunny_outlined,
+                  label: 'Lid Status',
+                  value: lidStatus,
+                  icon: Icons.door_front_door_outlined,
                   iconColor: Color(0xFFFCD34D),
                 ),
                 DarkStatCard(
@@ -615,7 +727,7 @@ class _HomeBody extends StatelessWidget {
     );
   }
 
-  Widget _buildQuickActions() {
+  Widget _buildQuickActions(BuildContext context) {
     final actions = [
       _QuickAction(
         label: 'Scan Plant',
@@ -634,20 +746,20 @@ class _HomeBody extends StatelessWidget {
         onTap: onNavigateAdd,
       ),
       _QuickAction(
-        label: 'Water All',
-        sub: 'Trigger irrigation',
+        label: 'Water',
+        sub: 'Select plant(s)',
         icon: Icons.water_drop_outlined,
         bg: const Color(0xFFE0F2FE),
         iconColor: const Color(0xFF0369A1),
-        onTap: () {},
+        onTap: () => _showWaterOptions(context),
       ),
       _QuickAction(
-        label: 'Move Light',
-        sub: 'Reposition LED',
-        icon: Icons.wb_sunny_outlined,
+        label: 'Lid Control',
+        sub: 'Open / Close',
+        icon: Icons.door_front_door_outlined,
         bg: const Color(0xFFFEF3C7),
         iconColor: const Color(0xFFD97706),
-        onTap: () {},
+        onTap: onToggleLid,
       ),
     ];
     return Padding(

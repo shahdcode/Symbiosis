@@ -23,6 +23,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _dashboardFuture = _loadDashboard();
   }
 
+  Future<String> _fetchLidStatus() async {
+    // TODO: replace with actual API call that returns lid status ('Open' or 'Closed')
+    // Example: return await _api.getLidStatus();
+    // For now, return a default value or simulate based on some logic
+    return 'Closed';
+  }
+
   Future<_DashboardSnapshot> _loadDashboard() async {
     try {
       final backendPlants = await _api.fetchPlants();
@@ -61,10 +68,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       plants.length)
                   .round();
 
+      final lidStatus = await _fetchLidStatus();
+
       return _DashboardSnapshot(
         plants: plants,
         avgHealth: avgHealth,
         waterTank: avgWaterTank,
+        lidStatus: lidStatus,
         logEntries:
             logEntries.isEmpty
                 ? [
@@ -78,6 +88,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 : logEntries.take(4).toList(),
       );
     } catch (_) {
+      // Fallback with default lid status
       return _DashboardSnapshot(
         plants: myPlants,
         avgHealth:
@@ -95,9 +106,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         ) /
                         myPlants.length)
                     .round(),
+        lidStatus: 'Closed',
         logEntries: const [
           _LogEntry(
-            time: '09:41',
+            time: 'now',
             event: 'Dashboard loaded from local fallback data',
             color: AppTheme.textMuted,
             weight: 0,
@@ -318,6 +330,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
         data.plants.isEmpty
             ? ['No plants']
             : data.plants.map((plant) => plant.name).toList();
+    final lidStatus = data.lidStatus;
+    final lidColor = lidStatus == 'Open' ? Color(0xFF4ADE80) : Color(0xFFEF4444);
+    final lidIcon = lidStatus == 'Open' ? Icons.door_front_door_outlined : Icons.door_back_door_outlined;
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
       child: Column(
@@ -341,6 +357,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // Water distribution bar (unchanged)
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -413,88 +430,84 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           .toList(),
                 ),
                 const Divider(color: Color(0xFFE5E7EB), height: 20),
+
+                // Lid Status section (replaces LED position)
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     const Text(
-                      'LED Position',
+                      'Lid Status',
                       style: TextStyle(
                         fontSize: 12,
                         color: AppTheme.textSecondary,
                         fontWeight: FontWeight.w500,
                       ),
                     ),
-                    Text(
-                      'Zone A (${data.plants.isNotEmpty ? data.plants.first.name : 'No plants'})',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Color(0xFFD97706),
-                        fontWeight: FontWeight.w600,
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: lidColor.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(lidIcon, size: 14, color: lidColor),
+                          const SizedBox(width: 4),
+                          Text(
+                            lidStatus,
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: lidColor,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 6),
-                LayoutBuilder(
-                  builder: (context, constraints) {
-                    final width =
-                        constraints.maxWidth.isFinite &&
-                                constraints.maxWidth > 0
-                            ? constraints.maxWidth
-                            : 375.0;
-                    return Stack(
-                      clipBehavior: Clip.none,
-                      children: [
-                        Container(
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFE5E7EB),
-                            borderRadius: BorderRadius.circular(99),
-                          ),
-                        ),
-                        Positioned(
-                          left: width * 0.2 - 40,
-                          top: -4,
+                const SizedBox(height: 12),
+                // Simple status indicator (no slider, just a visual cue)
+                Container(
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: lidColor.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(99),
+                  ),
+                  child: lidStatus == 'Open'
+                      ? FractionallySizedBox(
+                          widthFactor: 0.6,
                           child: Container(
-                            width: 16,
-                            height: 16,
                             decoration: BoxDecoration(
-                              color: const Color(0xFFFCD34D),
-                              shape: BoxShape.circle,
-                              border: Border.all(color: Colors.white, width: 3),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: const Color(
-                                    0xFFFCD34D,
-                                  ).withValues(alpha: 0.5),
-                                  blurRadius: 10,
-                                ),
-                              ],
+                              color: lidColor,
+                              borderRadius: BorderRadius.circular(99),
+                            ),
+                          ),
+                        )
+                      : FractionallySizedBox(
+                          widthFactor: 0.2,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: lidColor,
+                              borderRadius: BorderRadius.circular(99),
                             ),
                           ),
                         ),
-                      ],
-                    );
-                  },
                 ),
                 const SizedBox(height: 3),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: const [
                     Text(
-                      'Zone A',
+                      'Closed',
                       style: TextStyle(fontSize: 9, color: AppTheme.textMuted),
                     ),
                     Text(
-                      'Zone B',
-                      style: TextStyle(fontSize: 9, color: AppTheme.textMuted),
-                    ),
-                    Text(
-                      'Zone C',
-                      style: TextStyle(fontSize: 9, color: AppTheme.textMuted),
-                    ),
-                    Text(
-                      'Zone D',
+                      'Open',
                       style: TextStyle(fontSize: 9, color: AppTheme.textMuted),
                     ),
                   ],
@@ -644,12 +657,14 @@ class _DashboardSnapshot {
   final List<PlantModel> plants;
   final int avgHealth;
   final int waterTank;
+  final String lidStatus;
   final List<_LogEntry> logEntries;
 
   const _DashboardSnapshot({
     required this.plants,
     required this.avgHealth,
     required this.waterTank,
+    required this.lidStatus,
     required this.logEntries,
   });
 
@@ -668,6 +683,7 @@ class _DashboardSnapshot {
               : (myPlants.fold<int>(0, (sum, plant) => sum + plant.waterTank) /
                       myPlants.length)
                   .round(),
+      lidStatus: 'Closed',
       logEntries: const [
         _LogEntry(
           time: 'now',
