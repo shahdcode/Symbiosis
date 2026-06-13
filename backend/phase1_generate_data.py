@@ -32,6 +32,7 @@ spec.loader.exec_module(metaheuristic_optimizer)
 
 # Now import the function
 optimize_water_allocations = metaheuristic_optimizer.optimize_water_allocations
+sweep_hyperparameters = metaheuristic_optimizer.sweep_hyperparameters
 # ── Species parameters ───────────────────────────────────────────────────────
 SPECIES = [
     {   # Plant 1 — Basil
@@ -135,6 +136,25 @@ def build_utility_fn(moistures, species, budget):
     return utility_fn
 
 
+# ── GA-SA Hyperparameter Sweep ───────────────────────────────────────────────
+# Sweeps different population/generation combos and picks the best
+# based on fitness score vs latency tradeoff.
+
+SWEEP_CONFIGS = [
+    {"population_size": 10, "generations": 10, "sa_steps": 30, "sa_t_start": 50.0, "sa_t_end": 0.5},
+    {"population_size": 10, "generations": 20, "sa_steps": 40, "sa_t_start": 60.0, "sa_t_end": 0.5},
+    {"population_size": 20, "generations": 10, "sa_steps": 40, "sa_t_start": 60.0, "sa_t_end": 0.5},
+    {"population_size": 20, "generations": 20, "sa_steps": 60, "sa_t_start": 80.0, "sa_t_end": 0.5},
+    {"population_size": 20, "generations": 30, "sa_steps": 60, "sa_t_start": 80.0, "sa_t_end": 0.5},
+    {"population_size": 30, "generations": 20, "sa_steps": 60, "sa_t_start": 80.0, "sa_t_end": 0.5},
+    {"population_size": 30, "generations": 30, "sa_steps": 80, "sa_t_start": 100.0, "sa_t_end": 0.5},
+    {"population_size": 50, "generations": 30, "sa_steps": 80, "sa_t_start": 100.0, "sa_t_end": 0.5},
+]
+
+# Target latency budget per cycle (ms) — must stay under this for real-time use
+LATENCY_BUDGET_MS = 300.0
+
+
 DAY_MULTIPLIERS = {
     1: 0.82, 2: 0.88, 3: 0.94, 4: 0.85,  5: 1.06,
     6: 1.12, 7: 1.20, 8: 0.91, 9: 0.86, 10: 1.00,
@@ -233,12 +253,12 @@ def simulate_day(day_num, b_start, c_start, tank_ml):
                 n_plants=2,
                 water_budget=budget,
                 utility_fn=util_fn,
-                population_size=20,
-                generations=20,
+                population_size=BEST_GA_PARAMS["population_size"],
+                generations=BEST_GA_PARAMS["generations"],
                 max_per_plant=caps,
-                sa_steps=60,
-                sa_t_start=80.0,
-                sa_t_end=0.5,
+                sa_steps=BEST_GA_PARAMS["sa_steps"],
+                sa_t_start=BEST_GA_PARAMS["sa_t_start"],
+                sa_t_end=BEST_GA_PARAMS["sa_t_end"],
             )
 
         # Apply irrigation
@@ -299,10 +319,85 @@ def simulate_day(day_num, b_start, c_start, tank_ml):
     return rows, tank_ml
 
 
+# Module-level best params — set by sweep before simulate_day is called
+BEST_GA_PARAMS = {
+    "population_size": 20,
+    "generations": 20,
+    "sa_steps": 60,
+    "sa_t_start": 80.0,
+    "sa_t_end": 0.5,
+}
+
+
 def main():
+    global BEST_GA_PARAMS
+
     out_dir = Path("offline_rl_project/data")
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "ga_sa_demonstrations.csv"
+    sweep_log_path = out_dir / "ga_sa_sweep_results.csv"
+
+    # ── Step 0: Hyperparameter sweep ────────────────────────────────────────
+    print("Running GA-SA hyperparameter sweep (this takes ~30 seconds)...")
+    best_cfg, sweep_results = sweep_hyperparameters(
+        n_plants=2,
+        water_budget=180.0,
+        n_trials=8,
+        latency_budget_ms=300.0,
+        verbose=True,
+    )
+
+    # Update global best params
+    BEST_GA_PARAMS = {
+        "population_size": best_cfg["population_size"],
+        "generations": best_cfg["generations"],
+        "sa_steps": best_cfg["sa_steps"],
+        "sa_t_start": best_cfg["sa_t_start"],
+        "sa_t_end": best_cfg["sa_t_end"],
+    }
+
+    # Save sweep log
+    sweep_fields = ["config_idx", "population_size", "generations", "sa_steps",
+                    "sa_t_start", "sa_t_end", "avg_fitness", "std_fitness",
+                    "avg_latency_ms", "within_budget"]
+    with open(sweep_log_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=sweep_fields)
+        writer.writeheader()
+        writer.writerows(sweep_results)
+    print(f"Sweep results saved → {sweep_log_path}")
+    print(f"Using params: pop={BEST_GA_PARAMS['population_size']} "
+          f"gen={BEST_GA_PARAMS['generations']} "
+          f"sa_steps={BEST_GA_PARAMS['sa_steps']}\n")
+
+    # Save best params to backend JSON so coordinator auto-loads them
+    try:
+        from app.algorithms.metaheuristic_optimizer import save_best_params
+        saved_path = save_best_params(best_cfg)
+        print(f"Best params saved to backend → {saved_path}")
+        print("  (coordinator will use these on next server restart)\n")
+    except Exception as _e:
+        print(f"  Could not save params to backend ({_e}) — sweep result still used for phases\n")
+
+    # ── Override with backend .env settings if they differ from defaults ────
+    # This lets the user pin specific params via GA_POPULATION_SIZE /
+    # GA_GENERATIONS in .env rather than relying on the sweep result.
+    try:
+        from app.core.config import settings as _settings
+        env_pop = _settings.ga_population_size
+        env_gen = _settings.ga_generations
+        # Only override if the .env values differ from the default (20/20)
+        # — a sign the user intentionally set them
+        if env_pop != 20 or env_gen != 20:
+            print(f"  [.env override] GA_POPULATION_SIZE={env_pop}  "
+                  f"GA_GENERATIONS={env_gen}  (overrides sweep result)")
+            BEST_GA_PARAMS["population_size"] = env_pop
+            BEST_GA_PARAMS["generations"] = env_gen
+        else:
+            print(f"  [.env] GA_POPULATION_SIZE and GA_GENERATIONS are at defaults — "
+                  f"keeping sweep result (pop={BEST_GA_PARAMS['population_size']}, "
+                  f"gen={BEST_GA_PARAMS['generations']})")
+    except Exception as _e:
+        print(f"  [.env] Could not load backend settings ({_e}) — using sweep result")
 
     all_rows = []
     tank_ml = TANK_CAPACITY
@@ -331,11 +426,19 @@ def main():
     c_in_range  = sum(r["plant_2_in_range"] for r in all_rows) / len(all_rows) * 100
     emergencies = sum(r["plant_1_emergency"] or r["plant_2_emergency"] for r in all_rows)
     print(f"\n=== GA-SA Summary ===")
+    print(f"  --- Winning GA-SA config ---")
+    print(f"  population_size : {BEST_GA_PARAMS['population_size']}")
+    print(f"  generations     : {BEST_GA_PARAMS['generations']}")
+    print(f"  sa_steps        : {BEST_GA_PARAMS['sa_steps']}")
+    print(f"  sa_t_start      : {BEST_GA_PARAMS['sa_t_start']}")
+    print(f"  sa_t_end        : {BEST_GA_PARAMS['sa_t_end']}")
+    print(f"  ---")
     print(f"  Total water    : {total_water:.2f} L")
     print(f"  Avg reward     : {avg_reward:.4f}")
     print(f"  Basil in-range : {b_in_range:.1f}%")
     print(f"  Coleus in-range: {c_in_range:.1f}%")
     print(f"  Emergencies    : {emergencies}")
+    print(f"\n  Sweep log      : offline_rl_project/data/ga_sa_sweep_results.csv")
 
 
 if __name__ == "__main__":
