@@ -16,34 +16,31 @@ app = create_app()
 
 @app.post("/sensors/reading")
 async def receive_sensor_data(request: Request):
-    """
-    ESP32 POSTs sensor readings here every cycle.
-    We inject them into the bridge's _latest_readings dict so the
-    scheduler picks them up on its next tick.
-    Returns actuation commands as JSON for the ESP32 to execute immediately.
-    """
+    """Handle batch sensor readings from ESP32."""
     try:
         data = await request.json()
     except Exception as e:
-        logger.error("JSON parse error: %s", e)
+        logger.error(f"JSON parse error: {e}")
         return {"status": "error", "message": "Invalid JSON"}
-
-    logger.info("Sensor POST received: %s", data)
-
+    
+    # Handle both old (single) and new (batch) formats
+    readings = data.get("readings", [data])  # If no 'readings' key, treat as single
+    
+    if not readings:
+        return {"status": "error", "message": "No readings"}
+    
+    logger.info(f"Received {len(readings)} sensor reading(s)")
+    
+    # Update bridge with each reading
     from app.hardware.bridge import ingest_sensor_post
-    # Support batch POSTs with a top-level "readings" array
-    readings = data.get("readings") if isinstance(data, dict) else None
-    if readings and isinstance(readings, list):
-        for r in readings:
-            await ingest_sensor_post(r)
-        from app.core.scheduler import run_allocation_cycle_http
-        commands = await run_allocation_cycle_http()
-        return {"status": "ok", "commands": commands}
-
-    # Single-reading POST — just ingest and return no commands immediately
-    await ingest_sensor_post(data)
-    return {"status": "ok", "commands": {}}
-
+    for reading in readings:
+        await ingest_sensor_post(reading)
+    
+    # Run one allocation cycle and get commands
+    from app.core.scheduler import run_allocation_and_get_commands
+    commands = await run_allocation_and_get_commands()
+    
+    return {"status": "ok", "commands": commands}
 
 class LogMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
