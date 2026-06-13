@@ -1,34 +1,26 @@
-/*
- * SYMBIOSIS — Two Plants, Full Actuation
- * ----------------------------------------
- * Sends JSON over Serial every 30 s, listens for water & lid commands.
- *
- * Fixes vs previous version:
- *  - Poll interval changed from 5 s → 30 s (matches backend allocation cycle).
- *  - actuateWater() sends JSON confirmation instead of plain text.
- *  - actuateLid() sends JSON confirmation, sets auto-close timer.
- *  - Servo auto-closes after LID_OPEN_DURATION_MS (60 s) if not already closed.
- *  - Boot message sent as JSON so bridge can parse it.
- *  - Servo initialised to 0° on boot and left there — backend only commands
- *    it when humidity actually exceeds threshold.
- */
-
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <DHT.h>
 #include <ESP32Servo.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
 
-// ========== Pin Definitions ==========
-#define SOIL1_PIN       34
-#define SOIL2_PIN       35
-#define LDR_PIN         36
-#define DHT_PIN          4
-#define TRIG_PIN         5
-#define ECHO_PIN        18
-#define PUMP_RELAY      26      // LOW = ON (active-low relay)
-#define VALVE1_RELAY    27
-#define VALVE2_RELAY    14
-#define SERVO_LID_PIN   13
+// ── Config ─────────────────────────────────────────────────────────────
+const char* WIFI_SSID     = "dodo1962";
+const char* WIFI_PASSWORD = "wsa801962";
+const char* BACKEND_URL   = "http://192.168.1.2:8000/sensors/reading";
+
+// ── Pins ─────────────────────────────────────────────────────────────
+#define SOIL1_PIN      34
+#define SOIL2_PIN      35
+#define LDR_PIN        36
+#define DHT_PIN         4
+#define TRIG_PIN        5
+#define ECHO_PIN       18
+#define PUMP_RELAY     26
+#define VALVE1_RELAY   27
+#define VALVE2_RELAY   14
+#define SERVO_LID_PIN  13
 
 #define DHT_TYPE DHT11
 
@@ -40,174 +32,200 @@ static unsigned long lidOpenedAt = 0;
 DHT dht(DHT_PIN, DHT_TYPE);
 Servo lidServo;
 
-// ========== Helpers ===================
+// ── State ─────────────────────────────────────────────────────────────
+static unsigned long lidOpenedAt = 0;
+static bool lidIsOpen = false;
+static int currentServoAngle = 90;   // Start at 90° (same as your test file)
 
+// ── Sensor helpers (identical to test file) ─────────────────────────
 float readDistance() {
+    digitalWrite(TRIG_PIN, LOW);  delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
     digitalWrite(TRIG_PIN, LOW);
-    delayMicroseconds(2);
-    digitalWrite(TRIG_PIN, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(TRIG_PIN, LOW);
-    long duration = pulseIn(ECHO_PIN, HIGH, 30000);
-    if (duration == 0) return -1.0f;
-    return duration * 0.034f / 2.0f;
+    long dur = pulseIn(ECHO_PIN, HIGH, 30000);
+    return (dur == 0) ? -1.0f : dur * 0.034f / 2.0f;
 }
 
 int soilPercent(int raw) {
-    // Capacitive sensor: dry ≈ 4095, wet ≈ 0
+    // Same as your test file: 4095 (dry) -> 0%, 0 (wet) -> 100%
     return map(constrain(raw, 0, 4095), 4095, 0, 0, 100);
 }
 
-void sendSensorData(const char* plant_id,
-                    int moisture, int lightRaw,
-                    float temp, float hum, float tank) {
-    StaticJsonDocument<256> doc;
-    doc["plant_id"]    = plant_id;
-    doc["moisture"]    = moisture;
-    doc["light"]       = lightRaw;
-    doc["temperature"] = temp;
-    doc["humidity"]    = hum;
-    doc["tank_level"]  = tank;   // cm from sensor to water surface
-    serializeJson(doc, Serial);
-    Serial.println();
+float rawToLux(int raw) {
+    return ((float)raw / 4095.0f) * 10000.0f;
+}
+
+// ── Actuation (copy of working test file's setPump, plus safe servo) ─
+void setPump(bool state) {
+    digitalWrite(PUMP_RELAY, state ? LOW : HIGH);
+    Serial.printf(" Pump : %s\n", state ? "ON" : "OFF");
 }
 
 // ========== Actuation =================
 
 void actuateWater(const char* plant, float ml) {
-    // duration: 1 ml ≈ 100 ms (calibrate to your pump flow rate)
-    unsigned long duration = (unsigned long)(ml / 10.0f * 1000.0f);
+    if (ml < 5.0) return;
+    Serial.printf("[WATER] %s: %.1f ml\n", plant, ml);
+    
+    // Open correct valve (valves are active LOW – same as test file)
+    if (strcmp(plant, "plant_1") == 0) digitalWrite(VALVE1_RELAY, LOW);
+    else if (strcmp(plant, "plant_2") == 0) digitalWrite(VALVE2_RELAY, LOW);
+    else return;
+    
+    setPump(true);
+    delay((unsigned long)(ml * 100));
+    setPump(false);
+    
+    // Close valves
+    digitalWrite(VALVE1_RELAY, HIGH);
+    digitalWrite(VALVE2_RELAY, HIGH);
+}
 
-    if (strcmp(plant, "plant_1") == 0) {
-        digitalWrite(VALVE1_RELAY, LOW);
-    } else if (strcmp(plant, "plant_2") == 0) {
-        digitalWrite(VALVE2_RELAY, LOW);
-    } else {
+// Safe servo movement – only moves if angle actually changed
+void actuateLid(int angle) {
+    // Clamp angle to 0-180
+    angle = constrain(angle, 0, 180);
+    
+    if (angle == currentServoAngle) {
+        Serial.printf("[LID] Already at %d°, skipping\n", angle);
         return;
     }
-
-    digitalWrite(PUMP_RELAY, LOW);
-    delay(duration);
-    digitalWrite(PUMP_RELAY, HIGH);
-    digitalWrite(VALVE1_RELAY, HIGH);
-    digitalWrite(VALVE2_RELAY, HIGH);
-
-    // JSON confirmation so the bridge can parse it
-    StaticJsonDocument<128> doc;
-    doc["event"] = "water_delivered";
-    doc["plant"] = plant;
-    doc["ml"]    = ml;
-    serializeJson(doc, Serial);
-    Serial.println();
-}
-
-void actuateLid(int angle) {
+    
+    Serial.printf("[LID] Moving from %d° to %d°\n", currentServoAngle, angle);
     lidServo.write(angle);
-    delay(1000);   // give servo time to reach position
-
+    delay(500);  // Allow time to move
+    currentServoAngle = angle;
+    
     if (angle > 0) {
-        lidIsOpen   = true;
+        lidIsOpen = true;
         lidOpenedAt = millis();
+        Serial.println("[LID] Opened");
     } else {
         lidIsOpen = false;
-    }
-
-    StaticJsonDocument<64> doc;
-    doc["event"] = "lid_moved";
-    doc["angle"] = angle;
-    serializeJson(doc, Serial);
-    Serial.println();
-}
-
-// ========== Command Parser ============
-
-void handleSerialCommand(const String& line) {
-    StaticJsonDocument<256> doc;
-    DeserializationError error = deserializeJson(doc, line);
-    if (error) return;   // silently ignore malformed input
-
-    if (doc.containsKey("water")) {
-        const char* plant = doc["water"]["plant"];
-        float ml          = doc["water"]["ml"];
-        actuateWater(plant, ml);
-    } else if (doc.containsKey("servo_lid")) {
-        int angle = doc["servo_lid"]["angle"];
-        actuateLid(angle);
+        Serial.println("[LID] Closed");
     }
 }
 
-// ========== Setup =====================
+// ── HTTP ──────────────────────────────────────────────────────────────
+void sendBatchAndActuate(int soil1, int soil2, float lux, float temp, float hum, float tank) {
+    if (WiFi.status() != WL_CONNECTED) return;
 
+    HTTPClient http;
+    http.begin(BACKEND_URL);
+    http.addHeader("Content-Type", "application/json");
+
+    StaticJsonDocument<512> doc;
+    JsonArray readings = doc.createNestedArray("readings");
+
+    JsonObject p1 = readings.createNestedObject();
+    p1["plant_id"] = "plant_1"; p1["moisture"] = soil1; p1["light"] = lux;
+    p1["temperature"] = temp; p1["humidity"] = hum; p1["tank_level"] = tank;
+
+    JsonObject p2 = readings.createNestedObject();
+    p2["plant_id"] = "plant_2"; p2["moisture"] = soil2; p2["light"] = lux;
+    p2["temperature"] = temp; p2["humidity"] = hum; p2["tank_level"] = tank;
+
+    String body;
+    serializeJson(doc, body);
+    
+    int code = http.POST(body);
+    if (code == 200) {
+        String resp = http.getString();
+        StaticJsonDocument<512> respDoc;
+        if (!deserializeJson(respDoc, resp)) {
+            JsonObject cmds = respDoc["commands"];
+            if (cmds.containsKey("water")) {
+                for (JsonObject w : cmds["water"].as<JsonArray>()) {
+                    actuateWater(w["plant"], w["ml"]);
+                }
+            }
+            if (cmds.containsKey("servo_lid")) {
+                actuateLid(cmds["servo_lid"]["angle"]);
+            }
+        }
+    }
+    http.end();
+}
+
+// ── Setup (identical to your working test file) ──────────────────────
 void setup() {
     Serial.begin(115200);
+    delay(1000);
+    
     dht.begin();
-
-    pinMode(TRIG_PIN,      OUTPUT);
-    pinMode(ECHO_PIN,      INPUT);
-    pinMode(PUMP_RELAY,    OUTPUT);
-    pinMode(VALVE1_RELAY,  OUTPUT);
-    pinMode(VALVE2_RELAY,  OUTPUT);
-
-    // Relays off at boot (active-low)
-    digitalWrite(PUMP_RELAY,   HIGH);
-    digitalWrite(VALVE1_RELAY, HIGH);
-    digitalWrite(VALVE2_RELAY, HIGH);
-
-    lidServo.attach(SERVO_LID_PIN);
-    lidServo.write(0);   // closed position at boot — stays here until commanded
-
-    // JSON boot message (bridge can parse; plain text caused Invalid JSON warnings)
-    StaticJsonDocument<64> doc;
-    doc["event"]  = "boot";
-    doc["plants"] = 2;
-    serializeJson(doc, Serial);
-    Serial.println();
+    
+    pinMode(TRIG_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
+    
+    // Servo init – EXACTLY as in your working test file
+    ESP32PWM::allocateTimer(0);
+    lidServo.setPeriodHertz(50);
+    lidServo.attach(SERVO_LID_PIN, 1000, 2000);
+    lidServo.write(90);          // Start at 90° (center) like test file
+    currentServoAngle = 90;
+    delay(500);
+    
+    // Pump and valves – same as test file (valves always on by default)
+    pinMode(PUMP_RELAY, OUTPUT);   digitalWrite(PUMP_RELAY, HIGH);
+    pinMode(VALVE1_RELAY, OUTPUT); digitalWrite(VALVE1_RELAY, LOW);   // Always ON
+    pinMode(VALVE2_RELAY, OUTPUT); digitalWrite(VALVE2_RELAY, LOW);   // Always ON
+    
+    Serial.println(F("Valve 1 : ALWAYS ON (GPIO27)"));
+    Serial.println(F("Valve 2 : ALWAYS ON (GPIO14)"));
+    
+    // Connect WiFi
+    Serial.printf("Connecting to %s", WIFI_SSID);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nWiFi connected");
+    
+    Serial.println("\n╔══════════════════════════════════════════╗");
+    Serial.println("║     SYMBIOSIS GREENHOUSE CONTROLLER      ║");
+    Serial.println("╚══════════════════════════════════════════╝\n");
 }
 
-// ========== Main Loop =================
-
+// ── Main Loop ─────────────────────────────────────────────────────────
 void loop() {
     static unsigned long lastSend = 0;
     unsigned long now = millis();
 
-    // ── Send sensor data every 30 s ──────────────────────────────────────────
-    if (now - lastSend >= 30000UL) {
+    // Send data every 30 seconds
+    if (now - lastSend >= 30000) {
         lastSend = now;
-
-        int   soil1    = soilPercent(analogRead(SOIL1_PIN));
-        int   soil2    = soilPercent(analogRead(SOIL2_PIN));
-        int   lightRaw = analogRead(LDR_PIN);
-        float temp     = dht.readTemperature();
-        float hum      = dht.readHumidity();
-        float tank     = readDistance();   // cm — backend converts to ml
-
-        // Guard against DHT read failures (returns NaN on error)
-        if (isnan(temp)) temp = -1.0f;
-        if (isnan(hum))  hum  = -1.0f;
-
-        sendSensorData("plant_1", soil1, lightRaw, temp, hum, tank);
-        sendSensorData("plant_2", soil2, lightRaw, temp, hum, tank);
+        
+        // Read all sensors (same as test file's style)
+        int soil1Raw = analogRead(SOIL1_PIN);
+        int soil1 = soilPercent(soil1Raw);
+        int soil2Raw = analogRead(SOIL2_PIN);
+        int soil2 = soilPercent(soil2Raw);
+        int ldrRaw = analogRead(LDR_PIN);
+        float lux = rawToLux(ldrRaw);
+        float temp = dht.readTemperature();
+        float hum = dht.readHumidity();
+        float tank = readDistance();
+        
+        if (isnan(temp)) temp = -1;
+        if (isnan(hum)) hum = -1;
+        
+        // Debug output (like test file)
+        Serial.println("\n📡 SENSOR READINGS");
+        Serial.printf(" Soil 1 : %3d%% (raw=%4d)\n", soil1, soil1Raw);
+        Serial.printf(" Soil 2 : %3d%% (raw=%4d)\n", soil2, soil2Raw);
+        Serial.printf(" Light  : %.0f lux (raw=%4d)\n", lux, ldrRaw);
+        Serial.printf(" Temp   : %.1f°C\n", temp);
+        Serial.printf(" Hum    : %.1f%%\n", hum);
+        Serial.printf(" Tank   : %.1f cm\n", tank);
+        
+        sendBatchAndActuate(soil1, soil2, lux, temp, hum, tank);
     }
-
-    // ── Auto-close lid after timeout ─────────────────────────────────────────
-    if (lidIsOpen && (now - lidOpenedAt >= LID_OPEN_DURATION_MS)) {
-        lidServo.write(0);
-        lidIsOpen = false;
-
-        StaticJsonDocument<64> doc;
-        doc["event"] = "lid_auto_closed";
-        serializeJson(doc, Serial);
-        Serial.println();
+    
+    // Auto-close lid after 60 seconds (only if opened)
+    if (lidIsOpen && (now - lidOpenedAt >= 60000)) {
+        actuateLid(90);   // Return to center (90°) – same as your test file's default
     }
-
-    // ── Receive commands from backend ─────────────────────────────────────────
-    if (Serial.available()) {
-        String line = Serial.readStringUntil('\n');
-        line.trim();
-        if (line.length() > 0) {
-            handleSerialCommand(line);
-        }
-    }
-
+    
     delay(10);
 }

@@ -167,25 +167,17 @@ async def allocation_cycle() -> None:
             profile = profiles.get(reading.plant_id)
             if profile is None or reading.humidity_pct is None:
                 continue
-
             hum_max = getattr(profile, "humidity_max", 75.0)
             if reading.humidity_pct > hum_max:
                 logger.warning(
-                    "💨 High humidity %.1f%% for %s (threshold %.1f%%) — venting for %d s",
-                    reading.humidity_pct, reading.plant_id, hum_max, _LID_VENT_SEC,
+                    "💨 High humidity %.1f%% for %s — venting",
+                    reading.humidity_pct, reading.plant_id,
                 )
                 actuate_servo_lid(_LID_OPEN_ANGLE)
-                servo_angle_this_cycle = _LID_OPEN_ANGLE
-                servo_action_desc = (
-                    f"opened {_LID_OPEN_ANGLE}° "
-                    f"(humidity {reading.humidity_pct:.1f}% > {hum_max:.1f}%)"
+                asyncio.get_event_loop().call_later(
+                    _LID_VENT_SEC, lambda: actuate_servo_lid(0)
                 )
-                # Wait for venting then close
-                await asyncio.sleep(_LID_VENT_SEC)
-                actuate_servo_lid(0)
-                servo_angle_this_cycle = 0
-                servo_action_desc += f" → closed after {_LID_VENT_SEC} s"
-                break  # one vent event per cycle is enough
+                break
 
         # ── 6. Learning update ────────────────────────────────────────────────
         logger.info("─" * 40)
@@ -282,6 +274,15 @@ def start_scheduler() -> None:
     # Wire resource agent into bridge BEFORE first cycle runs
     set_resource_agent(_resource_agent)
 
+    # If no serial port configured (HTTP-only mode), do not start periodic scheduler
+    if not settings.arduino_port:
+        logger.info("No serial port – scheduler disabled (HTTP-only mode)")
+        return
+
+    if scheduler.running:
+        logger.info("Scheduler already running — skipping start")
+        return
+
     scheduler.add_job(
         allocation_cycle,
         "interval",
@@ -294,5 +295,136 @@ def start_scheduler() -> None:
 
 
 def stop_scheduler() -> None:
+    if not scheduler.running:
+        logger.info("Scheduler already stopped — skipping shutdown")
+        return
     scheduler.shutdown(wait=False)
     logger.info("Scheduler stopped")
+
+
+async def run_allocation_and_get_commands() -> dict:
+    """
+    Runs the agent pipeline on the current _latest_readings and returns
+    actuation commands as a dict the HTTP endpoint can return to the ESP32.
+    Called from bridge.ingest_sensor_post() on every complete sensor update.
+    """
+    commands: dict = {}
+    try:
+        plant_docs = await repository.get_all_plants()
+        if not plant_docs:
+            return commands
+
+        profiles = {d["plant_id"]: PlantProfile(**d) for d in plant_docs}
+        from app.hardware.bridge import read_sensors
+        readings = read_sensors()
+        if not readings:
+            return commands
+
+        all_requests = []
+        for reading in readings:
+            await repository.insert_reading(reading.model_dump())
+            if reading.plant_id not in profiles:
+                continue
+            _resource_agent.update_plant_ekf(
+                reading.plant_id, reading.moisture_pct,
+                reading.temperature_c, reading.humidity_pct, reading.light_lux,
+            )
+            agent = PlantAgent(profiles[reading.plant_id])
+            all_requests.extend(agent.generate_requests(reading))
+
+        constraints = _resource_agent.get_constraints()
+        decision = await _coordinator.allocate(all_requests, constraints)
+
+        water_cmds = []
+        for plant_id, ml in decision.water_allocations.items():
+            actuate_water(plant_id, ml)
+            _resource_agent.consume_water(ml)
+            water_cmds.append({"plant": plant_id, "ml": round(ml, 1)})
+        if water_cmds:
+            commands["water"] = water_cmds
+
+        for reading in readings:
+            profile = profiles.get(reading.plant_id)
+            if profile is None or reading.humidity_pct is None:
+                continue
+            hum_max = getattr(profile, "humidity_max", 75.0)
+            if reading.humidity_pct > hum_max:
+                logger.warning(
+                    "High humidity %.1f%% for %s — commanding lid open",
+                    reading.humidity_pct, reading.plant_id,
+                )
+                actuate_servo_lid(_LID_OPEN_ANGLE)
+                commands["servo_lid"] = {"angle": _LID_OPEN_ANGLE}
+                asyncio.get_event_loop().call_later(
+                    _LID_VENT_SEC, lambda: actuate_servo_lid(0)
+                )
+                break
+
+        logger.info(
+            "Allocation complete | utility=%.4f | commands=%s",
+            decision.total_utility, commands,
+        )
+    except Exception:
+        logger.exception("run_allocation_and_get_commands failed")
+    return commands
+
+
+async def run_allocation_cycle_http() -> dict:
+    """
+    Run allocation on current _latest_readings and return commands WITHOUT
+    performing local actuation or consuming resources. Intended for HTTP
+    request/response usage where the firmware will perform actuation.
+    """
+    commands: dict = {}
+    try:
+        plant_docs = await repository.get_all_plants()
+        if not plant_docs:
+            return commands
+
+        profiles = {d["plant_id"]: PlantProfile(**d) for d in plant_docs}
+        from app.hardware.bridge import read_sensors
+        readings = read_sensors()
+        if not readings:
+            return commands
+
+        all_requests = []
+        for reading in readings:
+            await repository.insert_reading(reading.model_dump())
+            if reading.plant_id not in profiles:
+                continue
+            _resource_agent.update_plant_ekf(
+                reading.plant_id, reading.moisture_pct,
+                reading.temperature_c, reading.humidity_pct, reading.light_lux,
+            )
+            agent = PlantAgent(profiles[reading.plant_id])
+            all_requests.extend(agent.generate_requests(reading))
+
+        constraints = _resource_agent.get_constraints()
+        decision = await _coordinator.allocate(all_requests, constraints)
+
+        water_cmds = []
+        for plant_id, ml in decision.water_allocations.items():
+            water_cmds.append({"plant": plant_id, "ml": round(ml, 1)})
+        if water_cmds:
+            commands["water"] = water_cmds
+
+        for reading in readings:
+            profile = profiles.get(reading.plant_id)
+            if profile is None or reading.humidity_pct is None:
+                continue
+            hum_max = getattr(profile, "humidity_max", 75.0)
+            if reading.humidity_pct > hum_max:
+                logger.warning(
+                    "High humidity %.1f%% for %s — will request lid open",
+                    reading.humidity_pct, reading.plant_id,
+                )
+                commands["servo_lid"] = {"angle": _LID_OPEN_ANGLE}
+                break
+
+        logger.info(
+            "HTTP allocation complete | utility=%.4f | commands=%s",
+            decision.total_utility, commands,
+        )
+    except Exception:
+        logger.exception("run_allocation_cycle_http failed")
+    return commands

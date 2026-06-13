@@ -15,6 +15,7 @@ Key points:
 
 import json
 import logging
+import time
 from typing import Optional
 
 from app.core.config import settings
@@ -29,6 +30,7 @@ _latest_readings: dict[str, SensorReading] = {}
 _serial_protocol: Optional[SerialBridgeProtocol] = None
 _serial_transport = None
 _resource_agent = None
+_last_lid_open: float = 0.0
 
 # ── Tank geometry — adjust to your physical reservoir ────────────────────────
 # Ultrasonic sensor returns distance-to-water-surface in cm.
@@ -102,6 +104,70 @@ def _on_serial_message(msg: dict) -> None:
         logger.exception("Error processing serial message: %s", msg)
 
 
+async def ingest_sensor_post(data: dict) -> dict:
+    """
+    Called by the /sensors/reading HTTP endpoint.
+    Parses the ESP32 JSON payload, updates _latest_readings and tank level,
+    then runs one allocation cycle and returns actuation commands.
+
+    Expected payload keys (short form from firmware):
+        p_id, m, l, t, h, tk
+    Or long form:
+        plant_id, moisture, light, temperature, humidity, tank_level
+    """
+    plant_id = str(data.get("p_id") or data.get("plant_id", ""))
+    moisture = _f_safe(data.get("m") or data.get("moisture"), 0.0)
+    light_lux = _f_safe(data.get("l") or data.get("light"), 0.0)
+    temperature = _f_safe(data.get("t") or data.get("temperature"))
+    humidity = _f_safe(data.get("h") or data.get("humidity"))
+    tank_raw = _f_safe(data.get("tk") or data.get("tank_level"))
+
+    if not plant_id:
+        logger.warning("ingest_sensor_post: missing plant_id in %s", data)
+        return {}
+
+    if tank_raw is not None and _resource_agent is not None:
+        if 0.0 <= tank_raw <= _TANK_MAX_HEIGHT_CM:
+            depth_cm = max(0.0, _TANK_MAX_HEIGHT_CM - tank_raw)
+            level_ml = depth_cm * _TANK_BASE_AREA_CM2
+            try:
+                _resource_agent.update_tank_level(level_ml)
+            except Exception:
+                logger.exception("Failed to update tank level")
+
+    sr = SensorReading(
+        plant_id=plant_id,
+        moisture_pct=moisture,
+        light_lux=light_lux if light_lux is not None else 0.0,
+        temperature_c=temperature,
+        humidity_pct=humidity,
+        sensor_ok=True,
+    )
+    _latest_readings[plant_id] = sr
+    logger.debug(
+        "Ingested HTTP sensor — %s: moisture=%.1f%%  temp=%s°C  hum=%s%%  light=%.0f lux",
+        plant_id,
+        sr.moisture_pct,
+        f"{sr.temperature_c:.1f}" if sr.temperature_c is not None else "N/A",
+        f"{sr.humidity_pct:.1f}" if sr.humidity_pct is not None else "N/A",
+        sr.light_lux,
+    )
+
+    # Do not run allocation here; HTTP endpoint will trigger a single
+    # allocation after all readings are ingested. This prevents double
+    # allocation when the ESP32 posts multiple readings per cycle.
+    return {}
+
+
+def _f_safe(val, fallback=None):
+    """Safe float conversion — returns fallback for None or NaN."""
+    try:
+        v = float(val)
+        return None if v != v else v
+    except (TypeError, ValueError):
+        return fallback
+
+
 # ── Bridge lifecycle ──────────────────────────────────────────────────────────
 
 async def start_bridge() -> None:
@@ -109,6 +175,9 @@ async def start_bridge() -> None:
     global _serial_protocol, _serial_transport
     if not settings.arduino_port:
         logger.info("No ARDUINO_PORT set — serial bridge inactive (simulation mode)")
+        return
+    if _serial_transport is not None:
+        logger.info("Serial bridge already started — skipping")
         return
     try:
         _serial_transport, _serial_protocol = await open_serial(
@@ -143,25 +212,19 @@ _sim_moisture: dict[str, float] = {}
 
 
 def read_sensors() -> list[SensorReading]:
-    """Return the most recent sensor readings.
-
-    Uses real Arduino data if the bridge is connected.
-    Falls back to simulation only when SIMULATE_SENSORS=true and no real
-    data has arrived yet.
-    """
     if _latest_readings:
         return list(_latest_readings.values())
-
+    # Never simulate if a real serial port is configured — wait for Arduino data
+    if settings.arduino_port:
+        return []
     if not settings.simulate_sensors:
         return []
-
-    # Simulation path
+    # Simulation path — only when no port and SIMULATE_SENSORS=true
     for pid in ("plant_1", "plant_2"):
         if pid not in _sim_moisture:
             _sim_moisture[pid] = _random.uniform(35.0, 70.0)
         else:
             _sim_moisture[pid] = max(5.0, _sim_moisture[pid] - _random.uniform(0.5, 2.0))
-
     return [
         SensorReading(
             plant_id=pid,
@@ -214,6 +277,14 @@ def actuate_servo_lid(angle: int) -> bool:
     should move.  Do NOT call with angle=0 every cycle — that causes
     continuous servo movement.
     """
+    global _last_lid_open
+    now = time.time()
+    # Cooldown: skip repeated open commands within 5 minutes
+    if angle > 0 and (now - _last_lid_open) < 300:
+        logger.info("Servo lid cooldown active — skipping angle=%d", angle)
+        return False
+    if angle > 0:
+        _last_lid_open = now
     ok = _send_command({"servo_lid": {"angle": int(angle)}})
     if ok:
         logger.info("Commanded servo_lid → angle=%d", angle)
